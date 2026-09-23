@@ -6,7 +6,7 @@ const CWD = '/p/chali'
 const MIN = 60_000
 const T0 = 1_700_000_000_000
 
-type Opts = { ios?: boolean; env?: Record<string, string>; store?: Record<string, unknown>; agents?: unknown[] }
+type Opts = { ios?: boolean; env?: Record<string, string>; store?: Record<string, unknown>; agents?: unknown[]; toolPrefix?: string; ids?: string[]; hangAgentList?: boolean }
 
 async function boot($: any, on: any, o: Opts = {}) {
   const clock = mock.clock(on, { now: T0 })
@@ -15,7 +15,10 @@ async function boot($: any, on: any, o: Opts = {}) {
   const registered: string[] = []
   on('session.start', ($: any, e: any) => ({ cwd: e.cwd }))
   on('session.cwd', () => ({ value: CWD }))
-  on('session.id', () => ({ value: 'sess-1' }))
+  // 可切換的 session id：/clear 之後 id 會變，但 session.start 不會再跑。
+  const ids = o.ids ?? ['sess-1']
+  let idIndex = 0
+  on('session.id', () => ({ value: ids[Math.min(idIndex, ids.length - 1)] }))
   on('fs.list', () => ({
     value:
       o.ios === false
@@ -24,9 +27,13 @@ async function boot($: any, on: any, o: Opts = {}) {
   }))
   on('tool.register', ($: any, e: any) => {
     registered.push(e.name)
-    return { value: { tool: e.name } }
+    return { value: { tool: `${o.toolPrefix ?? 'mcp__ios-stage-bar__'}${e.name}` } }
   })
-  on('agent.list', () => ({ value: o.agents ?? [] }))
+  on('agent.list', async () => {
+    if (o.hangAgentList) await clock.sleep(60 * MIN)
+    return { value: o.agents ?? [] }
+  })
+  on('turn.start', ($: any, e: any) => ({ turnId: e.turnId }))
   on('tool.check', () => ({ decision: 'ask' }))
   on('ui.render', () => ({ type: 'engine', ref: 0 }))
   // 最底層的工具實作：Bash 的 sleep 會在 mock clock 上等 30 分鐘。
@@ -35,7 +42,7 @@ async function boot($: any, on: any, o: Opts = {}) {
     return { result: `bottom:${e.tool}` }
   })
   await $.session.start({ cwd: CWD, surface: 'terminal', isInteractive: true })
-  return { clock, registered }
+  return { clock, registered, clearSession: () => void idIndex++ }
 }
 
 const PROPS = (over: Record<string, unknown> = {}) => ({
@@ -72,6 +79,13 @@ describe('啟用條件', () => {
     expect(rows[0]).toContain('需求')
     expect(rows[0]).toContain('尚未設定階段')
   })
+  test('每列是一個 truncate-end 的 Text（寬度估錯時截斷，不折行）', async ($, on) => {
+    await boot($, on)
+    const ui = await $.ui.mount({ plugin: PLUGIN, surface: 'terminal', component: 'AbovePrompt', props: PROPS() as any })
+    const row = await ui.find({ type: 'Text', text: /需求/ })
+    expect(row?.props.wrap).toBe('truncate-end')
+    await ui.unmount()
+  })
   test('hasSurvey 時讓出 band', async ($, on) => {
     await boot($, on)
     expect(await band($, { hasSurvey: true })).toHaveLength(0)
@@ -86,6 +100,33 @@ describe('SetStage 與放行', () => {
     expect(r.result).toContain('驗證')
     const rows = await band($)
     expect(rows[0]).toMatch(/M48.*需求.*驗證 T3\/5 · 0m/)
+  })
+  test('SetStage 的工具名取自 $.tool.register 的回傳值', async ($, on) => {
+    await boot($, on, { toolPrefix: 'mcp__renamed__' })
+    const r: any = await $.tool.call({ tool: 'mcp__renamed__SetStage', stage: 'plan' } as any)
+    expect(r.result).toContain('拆解')
+  })
+  test('顯示邏輯的 $ 呼叫卡住也不延遲工具結果', async ($, on) => {
+    const { clock } = await boot($, on, { hangAgentList: true })
+    let done = false
+    const p = $.tool.call({ tool: 'Bash', command: 'echo hi' } as any).then((r: any) => {
+      done = true
+      return r
+    })
+    await clock.settle()
+    expect(done).toBe(true)
+    expect((await p).result).toBe('bottom:Bash')
+    await clock.advance(61 * MIN)
+  })
+  test('/clear 後（session.start 不重跑）turn.start 換新 session id，上個 session 的鎖失效', async ($, on) => {
+    const { clearSession } = await boot($, on, { ids: ['sess-1', 'sess-2'] })
+    await $.tool.call({ tool: TOOL, stage: 'impl' } as any)
+    await $.tool.call({ tool: 'Bash', command: 'xcodebuild test -scheme A' } as any)
+    expect((await band($))[0]).toMatch(/實作 · \d+m/)
+    clearSession()
+    await $.turn.start({ text: 'hi', turnId: 't2' } as any)
+    await $.tool.call({ tool: 'Bash', command: 'xcodebuild test -scheme A' } as any)
+    expect((await band($))[0]).toMatch(/驗證 · \d+m/)
   })
   test('SetStage 未知階段回說明字串', async ($, on) => {
     await boot($, on)
@@ -130,9 +171,9 @@ describe('卡住偵測', () => {
     const pending = $.tool.call({ tool: 'Bash', command: 'sleep 9999' } as any)
     await clock.settle()
     await clock.advance(19 * MIN)
-    expect((await band($))[1]).toContain('🔄 sleep 9999 19m')
+    expect((await band($, { isWorking: true }))[1]).toContain('🔄 sleep 9999 19m')
     await clock.advance(2 * MIN)
-    const rows = await band($)
+    const rows = await band($, { isWorking: true })
     expect(rows[1]).toContain('⚠ 主迴圈 21 分鐘沒有動靜（sleep 9999 仍在跑）')
     await clock.advance(10 * MIN)
     await pending
@@ -154,10 +195,16 @@ describe('卡住偵測', () => {
     // 模擬引擎：這個呼叫要授權（ask），person 在對話框前想了 5 分鐘。
     await $.tool.check({ tool: 'Bash', input: { command: 'sleep needs-ok' }, tool_use_id: 'tu-1' })
     await clock.advance(5 * MIN)
-    const first = await band($)
-    expect(first[1] ?? '').not.toContain('⚠')
+    // 對話框期間 band 可能被重畫多次：每次都要是「⏸ 等你：授權」，不能被重畫清掉。
+    expect((await band($, { isWorking: true }))[1]).toContain('⏸ 等你：授權 sleep needs-ok')
+    await clock.advance(1 * MIN)
+    expect((await band($, { isWorking: true }))[1]).toContain('⏸ 等你：授權 sleep needs-ok')
+    // 指令真的開始跑：引擎畫出該呼叫的 ToolProgress（run-in-background 提示）。
+    const prog = await $.ui.mount({ plugin: PLUGIN, surface: 'terminal', component: 'ToolProgress', props: { tool_use_id: 'tu-1', kind: 'background_hint', hint: '(ctrl+b to run in background)' } as any })
+    await prog.unmount()
+    expect((await band($, { isWorking: true }))[1]).toContain('🔄')
     await clock.advance(2 * MIN)
-    expect((await band($))[1]).toContain('⚠ 主迴圈 2 分鐘沒有動靜（sleep needs-ok 仍在跑）')
+    expect((await band($, { isWorking: true }))[1]).toContain('⚠ 主迴圈 2 分鐘沒有動靜（sleep needs-ok 仍在跑）')
     await clock.advance(30 * MIN)
     await pending
   })

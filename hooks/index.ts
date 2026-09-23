@@ -7,9 +7,7 @@ import { agentShortName, callLabel, classify, type ToolEvent } from '../src/rule
 import { applyClassification, applySetStage, emptyState, type StageState } from '../src/state.ts'
 import { renderLines, lineText, type Activity, type AgentRow, type InFlight, type Line, type Thresholds } from '../src/format.ts'
 
-const PLUGIN = 'ios-stage-bar'
 const SET_STAGE = 'SetStage'
-const SET_STAGE_TOOL = `mcp__${PLUGIN}__${SET_STAGE}`
 const MAIN = 'main'
 /** 給排版留 1 欄餘裕，避免 ambiguous-width 字元在某些字型下多佔一欄造成折行。 */
 const SAFETY_COLUMNS = 1
@@ -18,10 +16,13 @@ const SIGNATURE_COLUMNS = [200, 80] as const
 
 type $ = EngineInterface
 
+
 // ── 模組狀態（hot reload 會清空；持久的部分在 $.store） ──
 let enabled = false
 let cwd = ''
 let sessionId = ''
+/** $.tool.register 回傳的完整工具名（mcp__<plugin>__SetStage）。 */
+let setStageTool = ''
 let state: StageState = emptyState()
 let th: Thresholds = THRESHOLDS
 let isWorking = false
@@ -32,14 +33,26 @@ const calls = new Map<string, InFlight>()
 const agentMeta = new Map<string, { short: string; startedAt: number }>()
 let agents: AgentRow[] = []
 
+// 同步時間：以最近一次 $.clock.now() 為基準，加上真實經過時間。
+// 工具呼叫的記錄因此不必 await 任何 $ 呼叫（不延遲工具），測試的 mock clock 也仍然適用。
+let clockBase = 0
+let realBase = 0
+function noteClock(t: number): number {
+  clockBase = t
+  realBase = Date.now()
+  return t
+}
+/** 真實經過時間取到秒（毫秒級抖動不該讓「19 分」顯示成「18 分」）。 */
+const nowSync = (): number => clockBase + Math.floor((Date.now() - realBase) / 1000) * 1000
+
 const storeKey = (dir: string): string => `stage:${dir}`
+const ignore = (): undefined => undefined
 
 async function detectIos($: $, dir: string): Promise<boolean> {
   const entries = await $.fs.list(dir)
-  const names = new Set(entries.map(e => e.name))
   const hasProject = entries.some(e => /\.(xcodeproj|xcworkspace)$/.test(e.name))
-  const hasAsc = names.has('.asc')
-  // 以 .xcodeproj／.xcworkspace 或 .asc/ 為主；Package.swift 需搭配 .asc/ 才算（已被 hasAsc 涵蓋）。
+  // 以 .xcodeproj／.xcworkspace 或 .asc/ 為主；Package.swift 需搭配 .asc/ 才算（已被 .asc 涵蓋）。
+  const hasAsc = entries.some(e => e.name === '.asc')
   return hasProject || hasAsc
 }
 
@@ -61,37 +74,55 @@ function signature(now: number): string {
   return SIGNATURE_COLUMNS.map(columns => renderLines(state, act, { sessionId, columns, maxRows: 2, th }).map(lineText).join('\n')).join('\n--\n')
 }
 
-async function persist($: $, next: StageState): Promise<void> {
+/** 同步更新狀態；寫 store 延到 tick（或 session 結束）才做，工具路徑上不碰 $.store。 */
+let dirty = false
+function persist(next: StageState): void {
   if (next === state) return
   state = next
+  dirty = true
+}
+
+async function flush($: $): Promise<void> {
+  if (!dirty) return
+  dirty = false
   await $.store.set(storeKey(cwd), state)
 }
 
-/** 更新 subagent 清單，內容有變才 invalidate（頻繁 invalidate 會閃爍）。 */
+/** 內容有變才 invalidate（頻繁 invalidate 會閃爍）。同步、不等任何 $ 回應。 */
+function invalidateIfChanged($: $, now: number): void {
+  const sig = signature(now)
+  if (sig === lastSignature) return
+  lastSignature = sig
+  $.ui.invalidate('ui.render')
+}
+
+/** tick：更新 subagent 清單、寫 store、必要時 invalidate。只在 timer 與 session.start 跑，不在工具路徑上。 */
 async function refresh($: $): Promise<void> {
-  const now = await $.clock.now()
+  const now = noteClock(await $.clock.now())
   try {
     const list = await $.agent.list()
-    const running = list.filter(a => a.status === 'running')
-    agents = running.map(a => {
-      let meta = agentMeta.get(a.id)
-      if (!meta) {
-        meta = { short: agentShortName(a.description, a.type), startedAt: now }
-        agentMeta.set(a.id, meta)
-      }
-      return { id: a.id, short: meta.short, startedAt: meta.startedAt }
-    })
+    agents = list
+      .filter(a => a.status === 'running')
+      .map(a => {
+        let meta = agentMeta.get(a.id)
+        if (!meta) {
+          meta = { short: agentShortName(a.description, a.type), startedAt: now }
+          agentMeta.set(a.id, meta)
+        }
+        return { id: a.id, short: meta.short, startedAt: meta.startedAt }
+      })
     // 自我修復：已結束的 subagent 還掛著的呼叫一併清掉。
     const finished = new Set(list.filter(a => a.status !== 'running').map(a => a.id))
     for (const [k, c] of calls) if (c.agentId && finished.has(c.agentId)) calls.delete(k)
   } catch {
     // agent 清單拿不到時沿用上一次的結果。
   }
-  const sig = signature(now)
-  if (sig !== lastSignature) {
-    lastSignature = sig
-    $.ui.invalidate('ui.render')
+  try {
+    await flush($)
+  } catch {
+    dirty = true
   }
+  invalidateIfChanged($, now)
 }
 
 function markEvent(owner: string, now: number): void {
@@ -99,18 +130,19 @@ function markEvent(owner: string, now: number): void {
   lastEventByOwner[owner] = now
 }
 
-async function onCallStart($: $, e: ToolEvent & { tool_use_id: string }): Promise<void> {
-  const now = await $.clock.now()
+type CallEvent = ToolEvent & { tool_use_id: string }
+
+function onCallStart(e: CallEvent): void {
+  const now = nowSync()
   markEvent(e.agentId ?? MAIN, now)
-  await persist($, applyClassification(state, classify(e), now, sessionId))
+  persist(applyClassification(state, classify(e), now, sessionId))
   const call: InFlight = { id: e.tool_use_id, tool: e.tool, label: callLabel(e), startedAt: now }
   if (e.agentId) call.agentId = e.agentId
   calls.set(e.tool_use_id, call)
-  await refresh($)
 }
 
-async function onCallEnd($: $, e: ToolEvent & { tool_use_id: string }, result: unknown): Promise<void> {
-  const now = await $.clock.now()
+function onCallEnd(e: CallEvent, result: unknown): void {
+  const now = nowSync()
   const started = calls.get(e.tool_use_id)?.startedAt ?? now
   calls.delete(e.tool_use_id)
   markEvent(e.agentId ?? MAIN, now)
@@ -121,21 +153,19 @@ async function onCallEnd($: $, e: ToolEvent & { tool_use_id: string }, result: u
       agentMeta.set(agentId, { short: agentShortName(e.description ?? '', e.subagent_type), startedAt: started })
     }
   }
-  await refresh($)
 }
 
-async function onSetStage($: $, e: Record<string, unknown>): Promise<string> {
+function onSetStage(e: Record<string, unknown>): string {
   const stage = e.stage
   if (typeof stage !== 'string' || !STAGE_IDS.includes(stage as StageId)) {
     return `未知的階段「${String(stage)}」；可用：${STAGE_IDS.join(', ')}`
   }
-  const now = await $.clock.now()
+  const now = nowSync()
   markEvent(typeof e.agentId === 'string' ? e.agentId : MAIN, now)
   const input: { stage: StageId; detail?: string; milestone?: string } = { stage: stage as StageId }
   if (typeof e.detail === 'string' && e.detail) input.detail = e.detail
   if (typeof e.milestone === 'string' && e.milestone) input.milestone = e.milestone
-  await persist($, applySetStage(state, input, now, sessionId))
-  await refresh($)
+  persist(applySetStage(state, input, now, sessionId))
   const label = STAGES.find(s => s.id === stage)?.label ?? stage
   return `階段已設為 ${label}（${stage}）${input.detail ? ` · ${input.detail}` : ''}${input.milestone ? ` · ${input.milestone}` : ''}`
 }
@@ -155,6 +185,7 @@ export const register: Register = on => {
       enabled = await detectIos($, cwd)
       if (!enabled) return r
       sessionId = await $.session.id()
+      noteClock(await $.clock.now())
       th = {
         ...THRESHOLDS,
         stuckToolMin: parseMinutes(await $.env.get('IOS_STAGE_BAR_STUCK_MIN'), THRESHOLDS.stuckToolMin),
@@ -162,7 +193,7 @@ export const register: Register = on => {
       }
       const saved = await $.store.get(storeKey(cwd))
       state = isStageState(saved) ? saved : emptyState()
-      await $.tool.register({
+      const reg = await $.tool.register({
         name: SET_STAGE,
         description: SET_STAGE_DESCRIPTION,
         inputSchema: {
@@ -175,10 +206,12 @@ export const register: Register = on => {
           required: ['stage'],
         },
       })
+      setStageTool = reg?.tool ?? ''
       $.clock.every(TICK_MS, () => {
-        refresh($).catch(() => undefined)
+        refresh($).catch(ignore)
       })
-      await refresh($)
+      // 第一次 tick 不等：agent 清單卡住也不拖住 session 開始。
+      refresh($).catch(ignore)
     } catch {
       // 偵測或初始化失敗：不畫，但絕不影響 session。
     }
@@ -187,33 +220,49 @@ export const register: Register = on => {
 
   on('turn.start', async ($, e, next) => {
     const r = await next(e)
+    if (!enabled) return r
     // 新的主迴圈 turn 開始時，上一輪主迴圈不可能還有進行中的呼叫：清掉殘留（中斷時可能漏收結束）。
     for (const [k, c] of calls) if (!c.agentId) calls.delete(k)
+    try {
+      // /clear 不會重跑 session.start，但 session id 會換：換了就讓 session 範圍的鎖／badge／接手標記失效。
+      const id = await $.session.id()
+      if (id && id !== sessionId) sessionId = id
+    } catch {
+      // 只影響顯示。
+    }
+    refresh($).catch(ignore)
     return r
   })
 
   on('tool.call', async ($, e, next) => {
     if (!enabled) return next(e)
-    if (e.tool === SET_STAGE_TOOL) {
+    if (setStageTool && e.tool === setStageTool) {
+      let result = '階段顯示暫時無法更新（不影響工作）'
       try {
-        return { result: await onSetStage($, e as unknown as Record<string, unknown>) }
+        result = onSetStage(e as unknown as Record<string, unknown>)
       } catch {
-        return { result: '階段顯示暫時無法更新（不影響工作）' }
+        // 只影響顯示。
       }
+      invalidateIfChanged($, nowSync())
+      return { result }
     }
-    const ev = e as unknown as ToolEvent & { tool_use_id: string }
+    const ev = e as unknown as CallEvent
     try {
-      await onCallStart($, ev)
+      onCallStart(ev)
     } catch {
       // 只影響顯示。
     }
+    // 工具立刻啟動；工具路徑上只做同步記錄＋$.ui.invalidate，不等任何 $ 回應，不延遲工具或其結果。
+    const pending = next(e)
+    invalidateIfChanged($, nowSync())
     let result: unknown
     try {
-      result = await next(e)
-      return result as Awaited<ReturnType<typeof next>>
+      result = await pending
+      return result as Awaited<typeof pending>
     } finally {
       try {
-        await onCallEnd($, ev, result)
+        onCallEnd(ev, result)
+        invalidateIfChanged($, nowSync())
       } catch {
         // 只影響顯示。
       }
@@ -223,11 +272,11 @@ export const register: Register = on => {
   on('tool.check', async ($, e, next) => {
     const r = await next(e)
     try {
-      // 只觀察：權限檢查回 ask 代表要等 person 決定，這段時間不該算「卡住」。
+      // 只觀察：權限檢查回 ask 代表要等 person 決定，這段時間不算「卡住」，顯示「⏸ 等你：授權」。
       const call = enabled && r.decision === 'ask' && e.tool_use_id ? calls.get(e.tool_use_id) : undefined
       if (call) {
         call.awaitingPermission = true
-        await refresh($)
+        invalidateIfChanged($, nowSync())
       }
     } catch {
       // 只影響顯示。
@@ -235,27 +284,48 @@ export const register: Register = on => {
     return r
   })
 
+  // 授權後指令真的開始跑：引擎在該呼叫下方畫出 ToolProgress（run-in-background 提示）。
+  // 沒有這個訊號的工具，等授權標記保留到呼叫結束（保守：寧可顯示「等你」也不誤報卡住）。
+  on('ui.render', { component: 'ToolProgress' }, ($, e, next) => {
+    try {
+      const call = enabled ? calls.get(e.props.tool_use_id) : undefined
+      if (call?.awaitingPermission) {
+        const now = nowSync()
+        call.awaitingPermission = false
+        call.startedAt = now
+        markEvent(call.agentId ?? MAIN, now)
+        invalidateIfChanged($, now)
+      }
+    } catch {
+      // 只影響顯示。
+    }
+    return next(e)
+  })
+
+  on('session.end', async ($, e, next) => {
+    try {
+      if (enabled) await flush($)
+    } catch {
+      // 只影響顯示。
+    }
+    return next(e)
+  })
+
   on('ui.render', { component: 'AbovePrompt' }, async ($, e, next) => {
     const below = await next(e)
     if (!enabled || e.props.hasSurvey) return below
     try {
       if (e.props.isWorking !== isWorking) isWorking = e.props.isWorking
-      const now = await $.clock.now()
-      // band 又畫出來了 = 授權對話框已關：等授權的呼叫從現在起才開始算執行時間。
-      for (const c of calls.values()) {
-        if (!c.awaitingPermission) continue
-        c.awaitingPermission = false
-        c.startedAt = now
-        markEvent(c.agentId ?? MAIN, now)
-      }
+      const now = noteClock(await $.clock.now())
       const columns = Math.max(1, e.props.bodyColumns - SAFETY_COLUMNS)
       const lines: Line[] = renderLines(state, activity(now), { sessionId, columns, maxRows: e.props.maxRows, th })
       const { Box, Text } = $.ui.resolve(e)
+      // 每列一個 truncate-end 的 Text：寬度估算只是盡力（ambiguous-width 字元在某些終端佔 2 欄），估錯時截斷不折行。
       const tree = Box({
         flexDirection: 'column',
         children: lines.map(line =>
-          Box({
-            flexDirection: 'row',
+          Text({
+            wrap: 'truncate-end',
             children: line.map(seg =>
               Text({
                 ...(seg.color ? { color: seg.color } : {}),
