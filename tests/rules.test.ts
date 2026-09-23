@@ -123,6 +123,9 @@ describe('標籤', () => {
     expect(commandLabel('echo hi')).toBe('echo hi')
     expect(commandLabel('for i in $(seq 1 150); do sleep 1; done; echo done')).toBe('for i in $(seq 1 150)')
     expect(commandLabel('while read l; do x; done')).toBe('while read l')
+    expect(commandLabel('for f in a\n  b; do echo; done')).toBe('for f in a b')
+    expect(commandLabel('xcodebuild \\\n  -scheme A \\\n  test')).toBe('xcodebuild test')
+    expect(commandLabel('python3 -\nprint(1)')).toBe('python3 -')
   })
   test('agentShortName', async () => {
     expect(agentShortName('M48 T3 add parser')).toBe('T3 impl')

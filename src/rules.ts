@@ -110,9 +110,13 @@ const COMMAND_MAX = 24
 const AGENT_SHORT_MAX = 14
 
 /** Bash 指令的簡短標籤：去掉 `cd … &&` 與環境變數前綴；xcodebuild 取其動作。 */
-export function commandLabel(command: string): string {
+export function commandLabel(raw: string): string {
+  // 多行指令壓成一行（避免撐出額外列）：續行 `\` 接起來；迴圈看整段，其餘只看第一行。
+  const joined = raw.replace(/\\\n/g, ' ')
+  const isLoop = /^\s*(for|while|until|if)\s/.test(joined)
+  const command = (isLoop ? joined : joined.split('\n')[0] ?? '').replace(/\s+/g, ' ').trim()
   // for／while／until／if 迴圈：取關鍵字到第一個 ; 或 do 為止，比只取兩個字好認。
-  if (/^\s*(for|while|until|if)\s/.test(command)) return truncateToWidth(command.trim().split(/;|\bdo\b/)[0]!.trim(), COMMAND_MAX)
+  if (isLoop) return truncateToWidth(command.split(/;|\bdo\b/)[0]!.trim(), COMMAND_MAX)
   const segs = command.split(/&&|;|\|\|/).map(s => s.trim()).filter(Boolean)
   const main = segs.find(s => !/^cd\s/.test(s)) ?? segs[0] ?? ''
   const words = main.split(/\s+/).filter(w => !/^[A-Za-z_][A-Za-z0-9_]*=/.test(w))
@@ -128,7 +132,7 @@ export function agentShortName(description: string, subagentType?: string): stri
   if (t) return `${t[0]} ${isReview ? 'review' : 'impl'}`
   const bank = description.match(/Bank [A-Z]/)
   if (bank) return bank[0]
-  return truncateToWidth(description, AGENT_SHORT_MAX)
+  return truncateToWidth(description.replace(/\s+/g, ' ').trim(), AGENT_SHORT_MAX)
 }
 
 /** 進行中工具呼叫的標籤。 */
