@@ -18,9 +18,14 @@ describe('卡住判定門檻', () => {
     const a = act({ calls: [{ id: 'c1', tool: 'Bash', label: 'xcodebuild test', startedAt: start }], lastEventAt: start, lastEventByOwner: { main: start } })
     expect(evaluateStatus(emptyState(), a, THRESHOLDS).kind).toBe('stuck')
   })
-  test('19 分鐘還不算卡住', async () => {
+  test('19 分鐘還不算卡住（turn 進行中）', async () => {
     const start = T0 - 19 * MIN
-    const a = act({ calls: [{ id: 'c1', tool: 'Bash', label: 'xcodebuild test', startedAt: start }], lastEventAt: start, lastEventByOwner: { main: start } })
+    const a = act({ isWorking: true, calls: [{ id: 'c1', tool: 'Bash', label: 'xcodebuild test', startedAt: start }], lastEventAt: start, lastEventByOwner: { main: start } })
+    expect(evaluateStatus(emptyState(), a, THRESHOLDS).kind).toBe('running')
+  })
+  test('isWorking 且主迴圈 xcodebuild test 跑 15 分鐘 → running（不走「沒有工具活動」分支）', async () => {
+    const start = T0 - 15 * MIN
+    const a = act({ isWorking: true, calls: [{ id: 'c1', tool: 'Bash', label: 'xcodebuild test', startedAt: start }], lastEventAt: start, lastEventByOwner: { main: start } })
     expect(evaluateStatus(emptyState(), a, THRESHOLDS).kind).toBe('running')
   })
   test('isWorking 且超過 stuckIdleMin 沒有工具事件 → stuck', async () => {

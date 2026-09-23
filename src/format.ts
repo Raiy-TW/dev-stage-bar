@@ -80,7 +80,9 @@ export function evaluateStatus(state: StageState, act: Activity, th: Thresholds)
     return { kind: 'stuck', text: `⚠ ${ownerName(owner, act)} ${minutes(now - since)} 分鐘沒有動靜（${oldest.label} 仍在跑）` }
   }
   // ⚠ turn 進行中卻很久沒有任何工具事件（模型本身可能卡住）。
-  if (!asking && !permission && act.isWorking && act.lastEventAt !== null && now - act.lastEventAt > th.stuckIdleMin * MIN) {
+  // 有工具正在跑時由上面的 stuckToolMin 規則負責，不走這條（否則長 xcodebuild 會提早誤報）。
+  const toolRunning = act.calls.some(c => c.tool !== ASK_TOOL && c.tool !== 'Agent')
+  if (!asking && !permission && !toolRunning && act.isWorking && act.lastEventAt !== null && now - act.lastEventAt > th.stuckIdleMin * MIN) {
     return { kind: 'stuck', text: `⚠ ${minutes(now - act.lastEventAt)} 分鐘沒有任何工具活動（模型可能卡住）` }
   }
   if (asking) return { kind: 'waiting', text: '⏸ 等你：回答問題' }
