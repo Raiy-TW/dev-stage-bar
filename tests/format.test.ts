@@ -56,6 +56,13 @@ describe('等待與執行中', () => {
     const a = act({ calls: [{ id: 'q', tool: 'AskUserQuestion', label: 'AskUserQuestion', startedAt: T0 }], lastEventAt: T0 })
     expect(evaluateStatus(emptyState(), a, THRESHOLDS).kind).toBe('waiting')
   })
+  test('等待授權的呼叫 → waiting（授權），不算卡住', async () => {
+    const start = T0 - 30 * MIN
+    const a = act({ calls: [{ id: 'c1', tool: 'Bash', label: 'rm -x', startedAt: start, awaitingPermission: true }], lastEventAt: start, lastEventByOwner: { main: start }, isWorking: true })
+    const st = evaluateStatus(emptyState(), a, THRESHOLDS)
+    expect(st.kind).toBe('waiting')
+    expect(st.text).toBe('⏸ 等你：授權 rm -x')
+  })
   test('AskUserQuestion 等很久也不算卡住', async () => {
     const start = T0 - 60 * MIN
     const a = act({ calls: [{ id: 'q', tool: 'AskUserQuestion', label: 'AskUserQuestion', startedAt: start }], lastEventAt: start, lastEventByOwner: { main: start }, isWorking: true })

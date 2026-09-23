@@ -111,6 +111,8 @@ const AGENT_SHORT_MAX = 14
 
 /** Bash 指令的簡短標籤：去掉 `cd … &&` 與環境變數前綴；xcodebuild 取其動作。 */
 export function commandLabel(command: string): string {
+  // for／while／until／if 迴圈：取關鍵字到第一個 ; 或 do 為止，比只取兩個字好認。
+  if (/^\s*(for|while|until|if)\s/.test(command)) return truncateToWidth(command.trim().split(/;|\bdo\b/)[0]!.trim(), COMMAND_MAX)
   const segs = command.split(/&&|;|\|\|/).map(s => s.trim()).filter(Boolean)
   const main = segs.find(s => !/^cd\s/.test(s)) ?? segs[0] ?? ''
   const words = main.split(/\s+/).filter(w => !/^[A-Za-z_][A-Za-z0-9_]*=/.test(w))

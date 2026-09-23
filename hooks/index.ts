@@ -220,12 +220,34 @@ export const register: Register = on => {
     }
   })
 
+  on('tool.check', async ($, e, next) => {
+    const r = await next(e)
+    try {
+      // 只觀察：權限檢查回 ask 代表要等 person 決定，這段時間不該算「卡住」。
+      const call = enabled && r.decision === 'ask' && e.tool_use_id ? calls.get(e.tool_use_id) : undefined
+      if (call) {
+        call.awaitingPermission = true
+        await refresh($)
+      }
+    } catch {
+      // 只影響顯示。
+    }
+    return r
+  })
+
   on('ui.render', { component: 'AbovePrompt' }, async ($, e, next) => {
     const below = await next(e)
     if (!enabled || e.props.hasSurvey) return below
     try {
       if (e.props.isWorking !== isWorking) isWorking = e.props.isWorking
       const now = await $.clock.now()
+      // band 又畫出來了 = 授權對話框已關：等授權的呼叫從現在起才開始算執行時間。
+      for (const c of calls.values()) {
+        if (!c.awaitingPermission) continue
+        c.awaitingPermission = false
+        c.startedAt = now
+        markEvent(c.agentId ?? MAIN, now)
+      }
       const columns = Math.max(1, e.props.bodyColumns - SAFETY_COLUMNS)
       const lines: Line[] = renderLines(state, activity(now), { sessionId, columns, maxRows: e.props.maxRows, th })
       const { Box, Text } = $.ui.resolve(e)

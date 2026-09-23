@@ -5,7 +5,15 @@ import { displayWidth, truncateToWidth } from './width.ts'
 
 export type Thresholds = { readonly [K in keyof typeof THRESHOLDS]: number }
 
-export type InFlight = { id: string; tool: string; label: string; agentId?: string; startedAt: number }
+export type InFlight = {
+  id: string
+  tool: string
+  label: string
+  agentId?: string
+  startedAt: number
+  /** 權限檢查回了 ask，正等 person 在對話框決定：算「等你」，不算卡住。 */
+  awaitingPermission?: boolean
+}
 export type AgentRow = { id: string; short: string; startedAt: number }
 
 export type Activity = {
@@ -57,10 +65,11 @@ function ownerName(owner: string, act: Activity): string {
 export function evaluateStatus(state: StageState, act: Activity, th: Thresholds): Status {
   const { now } = act
   const asking = act.calls.some(c => c.tool === ASK_TOOL)
+  const permission = act.calls.find(c => c.awaitingPermission)
 
   // ⚠ 工具呼叫進行太久，且該 loop 之後沒有任何新事件。
   const stuckCalls = act.calls
-    .filter(c => c.tool !== ASK_TOOL && c.tool !== 'Agent')
+    .filter(c => c.tool !== ASK_TOOL && c.tool !== 'Agent' && !c.awaitingPermission)
     .filter(c => now - c.startedAt > th.stuckToolMin * MIN)
     .filter(c => now - (act.lastEventByOwner[ownerOf(c)] ?? c.startedAt) > th.stuckToolMin * MIN)
     .sort((a, b) => a.startedAt - b.startedAt)
@@ -71,10 +80,11 @@ export function evaluateStatus(state: StageState, act: Activity, th: Thresholds)
     return { kind: 'stuck', text: `⚠ ${ownerName(owner, act)} ${minutes(now - since)} 分鐘沒有動靜（${oldest.label} 仍在跑）` }
   }
   // ⚠ turn 進行中卻很久沒有任何工具事件（模型本身可能卡住）。
-  if (!asking && act.isWorking && act.lastEventAt !== null && now - act.lastEventAt > th.stuckIdleMin * MIN) {
+  if (!asking && !permission && act.isWorking && act.lastEventAt !== null && now - act.lastEventAt > th.stuckIdleMin * MIN) {
     return { kind: 'stuck', text: `⚠ ${minutes(now - act.lastEventAt)} 分鐘沒有任何工具活動（模型可能卡住）` }
   }
   if (asking) return { kind: 'waiting', text: '⏸ 等你：回答問題' }
+  if (permission) return { kind: 'waiting', text: `⏸ 等你：授權 ${permission.label}` }
   if (state.stage && WAITING_STAGES.includes(state.stage)) return { kind: 'waiting', text: '⏸ 等你：真機驗收' }
   if (state.stage === 'submit' && state.submitted) return { kind: 'waiting', text: '⏸ 排審中' }
   if (act.calls.length > 0 || act.agents.length > 0 || (act.lastEventAt !== null && now - act.lastEventAt <= th.activeMin * MIN)) {
@@ -187,7 +197,7 @@ function firstLine(state: StageState, now: number, sessionId: string, columns: n
 
 function activityParts(act: Activity, th: Thresholds): string[] {
   const { now } = act
-  const visible = act.calls.filter(c => c.tool !== 'Agent' && c.tool !== ASK_TOOL && now - c.startedAt >= th.showToolAfterSec * 1000)
+  const visible = act.calls.filter(c => c.tool !== 'Agent' && c.tool !== ASK_TOOL && !c.awaitingPermission && now - c.startedAt >= th.showToolAfterSec * 1000)
   const longest = (owner: string): InFlight | undefined =>
     visible.filter(c => ownerOf(c) === owner).sort((a, b) => a.startedAt - b.startedAt)[0]
   const parts: string[] = []

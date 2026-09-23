@@ -24,9 +24,10 @@ async function boot($: any, on: any, o: Opts = {}) {
   }))
   on('tool.register', ($: any, e: any) => {
     registered.push(e.name)
-    return {}
+    return { value: { tool: e.name } }
   })
   on('agent.list', () => ({ value: o.agents ?? [] }))
+  on('tool.check', () => ({ decision: 'ask' }))
   on('ui.render', () => ({ type: 'engine', ref: 0 }))
   // 最底層的工具實作：Bash 的 sleep 會在 mock clock 上等 30 分鐘。
   on('tool.call', async ($: any, e: any) => {
@@ -145,6 +146,20 @@ describe('卡住偵測', () => {
     await clock.advance(30 * MIN)
     await pending
     expect((await band($))[1] ?? '').not.toContain('⚠')
+  })
+  test('等授權的時間不算卡住；band 重新出現（授權結束）後才開始計時', async ($, on) => {
+    const { clock } = await boot($, on, { env: { IOS_STAGE_BAR_STUCK_MIN: '1' } })
+    const pending = $.tool.call({ tool: 'Bash', command: 'sleep needs-ok', tool_use_id: 'tu-1' } as any)
+    await clock.settle()
+    // 模擬引擎：這個呼叫要授權（ask），person 在對話框前想了 5 分鐘。
+    await $.tool.check({ tool: 'Bash', input: { command: 'sleep needs-ok' }, tool_use_id: 'tu-1' })
+    await clock.advance(5 * MIN)
+    const first = await band($)
+    expect(first[1] ?? '').not.toContain('⚠')
+    await clock.advance(2 * MIN)
+    expect((await band($))[1]).toContain('⚠ 主迴圈 2 分鐘沒有動靜（sleep needs-ok 仍在跑）')
+    await clock.advance(30 * MIN)
+    await pending
   })
   test('isWorking 但 10 分鐘沒工具事件 → ⚠', async ($, on) => {
     const { clock } = await boot($, on)

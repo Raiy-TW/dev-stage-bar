@@ -121,6 +121,8 @@ describe('標籤', () => {
     expect(commandLabel('cd /p && xcodebuild -scheme A test -destination x')).toBe('xcodebuild test')
     expect(commandLabel('FOO=1 sleep 90')).toBe('sleep 90')
     expect(commandLabel('echo hi')).toBe('echo hi')
+    expect(commandLabel('for i in $(seq 1 150); do sleep 1; done; echo done')).toBe('for i in $(seq 1 150)')
+    expect(commandLabel('while read l; do x; done')).toBe('while read l')
   })
   test('agentShortName', async () => {
     expect(agentShortName('M48 T3 add parser')).toBe('T3 impl')
