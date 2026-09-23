@@ -211,6 +211,8 @@ export const register: Register = on => {
         refresh($).catch(ignore)
       })
       // 第一次 tick 不等：agent 清單卡住也不拖住 session 開始。
+      // 但 hook 返回後才完成的 $ 呼叫不保證生效（實測首次 invalidate 會掉），所以這裡先同步 invalidate 一次。
+      invalidateIfChanged($, nowSync())
       refresh($).catch(ignore)
     } catch {
       // 偵測或初始化失敗：不畫，但絕不影響 session。
@@ -230,7 +232,7 @@ export const register: Register = on => {
     } catch {
       // 只影響顯示。
     }
-    refresh($).catch(ignore)
+    invalidateIfChanged($, nowSync())
     return r
   })
 
