@@ -91,7 +91,7 @@ export const TICK_MS = 20_000
 export const NARROW_COLUMNS = 40
 
 /** 點線進度條右側保留的邊距（欄）。 */
-export const SAFETY_MARGIN = 1
+export const SAFETY_MARGIN = 2
 
 /** Macaron 色系（對應 statusline.sh 的 soft blue / green / lemon / coral）。 */
 export const COLORS = {
