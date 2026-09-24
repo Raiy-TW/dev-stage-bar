@@ -1,7 +1,7 @@
 {
   "name": "dev-stage-bar",
-  "version": "0.1.0",
-  "description": "iOS 開發流程階段進度條＋即時活動／卡住偵測，畫在 prompt 上方（僅 iOS 專案）",
+  "version": "0.2.0",
+  "description": "任務進度條（新功能／修 bug／非程式工作各有步驟表）＋即時活動／卡住偵測，畫在 prompt 上方；所有專案可用",
   "author": {
     "name": "Raiy"
   }
