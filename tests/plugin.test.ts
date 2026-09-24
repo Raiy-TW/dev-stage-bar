@@ -2,7 +2,7 @@ import { test, expect, mock, describe } from 'claude-code/testing'
 
 const PLUGIN = 'ios-stage-bar'
 const TOOL = 'mcp__ios-stage-bar__SetStage'
-const CWD = '/p/chali'
+const CWD = '/p/my-app'
 const MIN = 60_000
 const T0 = 1_700_000_000_000
 
@@ -23,7 +23,7 @@ async function boot($: any, on: any, o: Opts = {}) {
     value:
       o.ios === false
         ? [{ name: 'package.json', kind: 'file', size: 1, isLink: false }]
-        : [{ name: 'Chali.xcodeproj', kind: 'dir', size: 0, isLink: false }],
+        : [{ name: 'MyApp.xcodeproj', kind: 'dir', size: 0, isLink: false }],
   }))
   on('tool.register', ($: any, e: any) => {
     registered.push(e.name)
