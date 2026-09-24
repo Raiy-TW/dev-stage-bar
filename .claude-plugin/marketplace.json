@@ -1,0 +1,17 @@
+{
+  "name": "ios-stage-bar",
+  "description": "iOS dev-flow stage progress for Claude Code",
+  "owner": {
+    "name": "Raiy",
+    "url": "https://github.com/Raiy-TW"
+  },
+  "plugins": [
+    {
+      "name": "ios-stage-bar",
+      "source": "./",
+      "description": "iOS dev-flow stage progress line with live activity and stuck detection, drawn above the Claude Code prompt.",
+      "version": "0.1.0",
+      "license": "MIT"
+    }
+  ]
+}
