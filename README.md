@@ -1,4 +1,4 @@
-# ios-stage-bar
+# dev-stage-bar
 
 Claude Code mod：在 iOS 專案的 prompt 上方畫出「現在在開發流程的哪一步」，並即時顯示正在跑什麼、是否疑似卡住。
 
@@ -32,14 +32,14 @@ A Claude Code mod (function hooks plugin) that draws the current iOS dev-flow st
 在 Claude Code 裡：
 
 ```
-/plugin marketplace add Raiy-TW/ios-stage-bar
-/plugin install ios-stage-bar@ios-stage-bar
+/plugin marketplace add Raiy-TW/dev-stage-bar
+/plugin install dev-stage-bar@dev-stage-bar
 ```
 
 開發中直接載入本機目錄（存檔會自動 reload）：
 
 ```bash
-CLAUDE_CODE_ENABLE_FUNCTION_HOOKS=1 claude --plugin-dir /path/to/ios-stage-bar
+CLAUDE_CODE_ENABLE_FUNCTION_HOOKS=1 claude --plugin-dir /path/to/dev-stage-bar
 ```
 
 首次在某個目錄使用時需要接受 workspace trust，hooks 才會載入。
@@ -49,7 +49,7 @@ CLAUDE_CODE_ENABLE_FUNCTION_HOOKS=1 claude --plugin-dir /path/to/ios-stage-bar
 優先序由高到低：
 
 1. **權威轉換**：呼叫這些 skill／workflow 時直接切換——`ios-review` → 審查、`ios-sim-verify` → 驗證、`ios-to-tf` → TF、`ios-submit` → 送審。沒有這些 skill 也沒關係，只是少了這條訊號。
-2. **模型宣告**：mod 註冊了一個工具 `mcp__ios-stage-bar__SetStage({ stage, detail?, milestone? })`。在你的 `CLAUDE.md` 或流程文件加一句「每進入一個階段先呼叫 SetStage」即可。`stage` 可用值：`intent` `spec` `plan` `impl` `verify` `review` `tf` `device` `submit`。
+2. **模型宣告**：mod 註冊了一個工具 `mcp__dev-stage-bar__SetStage({ stage, detail?, milestone? })`。在你的 `CLAUDE.md` 或流程文件加一句「每進入一個階段先呼叫 SetStage」即可。`stage` 可用值：`intent` `spec` `plan` `impl` `verify` `review` `tf` `device` `submit`。
 3. **推測**（本 session 還沒有宣告時才會改階段，否則只更新第 3 行）：寫入 `/specs/` → 規格；派 `T3 …` 類 subagent → 實作；主迴圈跑 `xcodebuild test`／`simctl`／lint → 驗證；`asc builds upload`／`asc publish testflight` → TF；`asc review` → 送審。subagent 內的測試只算該 subagent 的細節，不改主流程階段。
 
 階段可以往回跳（驗證失敗回實作是常態）。狀態以 cwd 為 key 存在 plugin store，新 session 會先顯示上次的階段並標「上次更新 X 前」。
@@ -62,8 +62,8 @@ CLAUDE_CODE_ENABLE_FUNCTION_HOOKS=1 claude --plugin-dir /path/to/ios-stage-bar
 
 | 變數 | 預設 | 意義 |
 |---|---|---|
-| `IOS_STAGE_BAR_STUCK_MIN` | 20 | 單一工具呼叫跑超過多久且沒有新事件，算可能卡住 |
-| `IOS_STAGE_BAR_IDLE_MIN` | 10 | 模型在工作但多久沒有任何工具事件，算可能卡住 |
+| `DEV_STAGE_BAR_STUCK_MIN` | 20 | 單一工具呼叫跑超過多久且沒有新事件，算可能卡住 |
+| `DEV_STAGE_BAR_IDLE_MIN` | 10 | 模型在工作但多久沒有任何工具事件，算可能卡住 |
 
 ## 開發
 

@@ -1,7 +1,7 @@
 import { test, expect, mock, describe } from 'claude-code/testing'
 
-const PLUGIN = 'ios-stage-bar'
-const TOOL = 'mcp__ios-stage-bar__SetStage'
+const PLUGIN = 'dev-stage-bar'
+const TOOL = 'mcp__dev-stage-bar__SetStage'
 const CWD = '/p/my-app'
 const MIN = 60_000
 const T0 = 1_700_000_000_000
@@ -27,7 +27,7 @@ async function boot($: any, on: any, o: Opts = {}) {
   }))
   on('tool.register', ($: any, e: any) => {
     registered.push(e.name)
-    return { value: { tool: `${o.toolPrefix ?? 'mcp__ios-stage-bar__'}${e.name}` } }
+    return { value: { tool: `${o.toolPrefix ?? 'mcp__dev-stage-bar__'}${e.name}` } }
   })
   on('agent.list', async () => {
     if (o.hangAgentList) await clock.sleep(60 * MIN)
@@ -180,7 +180,7 @@ describe('卡住偵測', () => {
     await pending
   })
   test('環境變數把門檻調成 1 分鐘', async ($, on) => {
-    const { clock } = await boot($, on, { env: { IOS_STAGE_BAR_STUCK_MIN: '1' } })
+    const { clock } = await boot($, on, { env: { DEV_STAGE_BAR_STUCK_MIN: '1' } })
     const pending = $.tool.call({ tool: 'Bash', command: 'sleep 9999' } as any)
     await clock.settle()
     await clock.advance(2 * MIN)
@@ -190,7 +190,7 @@ describe('卡住偵測', () => {
     expect((await band($))[1] ?? '').not.toContain('⚠')
   })
   test('等授權的時間不算卡住；band 重新出現（授權結束）後才開始計時', async ($, on) => {
-    const { clock } = await boot($, on, { env: { IOS_STAGE_BAR_STUCK_MIN: '1' } })
+    const { clock } = await boot($, on, { env: { DEV_STAGE_BAR_STUCK_MIN: '1' } })
     const pending = $.tool.call({ tool: 'Bash', command: 'sleep needs-ok', tool_use_id: 'tu-1' } as any)
     await clock.settle()
     // 模擬引擎：這個呼叫要授權（ask），person 在對話框前想了 5 分鐘。

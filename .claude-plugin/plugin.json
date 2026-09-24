@@ -1,5 +1,5 @@
 {
-  "name": "ios-stage-bar",
+  "name": "dev-stage-bar",
   "version": "0.1.0",
   "description": "iOS 開發流程階段進度條＋即時活動／卡住偵測，畫在 prompt 上方（僅 iOS 專案）",
   "author": {

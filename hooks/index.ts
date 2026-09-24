@@ -1,4 +1,4 @@
-// ios-stage-bar：在 iOS 專案的 prompt 上方畫階段進度條與即時活動。
+// dev-stage-bar：在 iOS 專案的 prompt 上方畫階段進度條與即時活動。
 // 原則：本 plugin 只觀察，永遠 `next(e)` 放行，不擋、不改寫任何工具；
 // 自己的邏輯出錯只影響顯示（全部包在 try/catch 裡）。
 import type { EngineInterface, Register } from 'claude-code'
@@ -188,8 +188,8 @@ export const register: Register = on => {
       noteClock(await $.clock.now())
       th = {
         ...THRESHOLDS,
-        stuckToolMin: parseMinutes(await $.env.get('IOS_STAGE_BAR_STUCK_MIN'), THRESHOLDS.stuckToolMin),
-        stuckIdleMin: parseMinutes(await $.env.get('IOS_STAGE_BAR_IDLE_MIN'), THRESHOLDS.stuckIdleMin),
+        stuckToolMin: parseMinutes(await $.env.get('DEV_STAGE_BAR_STUCK_MIN'), THRESHOLDS.stuckToolMin),
+        stuckIdleMin: parseMinutes(await $.env.get('DEV_STAGE_BAR_IDLE_MIN'), THRESHOLDS.stuckIdleMin),
       }
       const saved = await $.store.get(storeKey(cwd))
       state = isStageState(saved) ? saved : emptyState()
