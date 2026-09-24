@@ -179,3 +179,13 @@ describe('任務訊號', () => {
     }
   })
 })
+
+describe('任務訊號強度', () => {
+  test('明確訊號 strong：ios-diagnose、systematic-debugging、brainstorming、gh issue；/specs/ 寫入 weak', async () => {
+    expect(classify({ tool: 'Skill', skill: 'ios-diagnose' }).taskStrength).toBe('strong')
+    expect(classify({ tool: 'Skill', skill: 'superpowers:systematic-debugging' }).taskStrength).toBe('strong')
+    expect(classify({ tool: 'Skill', skill: 'superpowers:brainstorming' }).taskStrength).toBe('strong')
+    expect(classify({ tool: 'Bash', command: 'gh issue view 3' }).taskStrength).toBe('strong')
+    expect(classify({ tool: 'Write', file_path: '/p/docs/specs/a.md' }).taskStrength).toBe('weak')
+  })
+})

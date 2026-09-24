@@ -1,6 +1,6 @@
 import { test, expect, describe } from 'claude-code/testing'
 import { emptyState, applyClassification, applySetStage, isLocked, resolveSetStage, migrateState, type StageState } from '../src/state.ts'
-import { WORK_MIN_READS } from '../src/stages.ts'
+import { TASK_SIGNAL_RANK, WORK_MIN_READS } from '../src/stages.ts'
 
 const S1 = 'session-1'
 const S2 = 'session-2'
@@ -88,14 +88,40 @@ describe('任務推斷', () => {
     for (let i = 0; i < WORK_MIN_READS + 2; i++) s = applyClassification(s, { readOnly: true }, 1000 + i, S1, 'default')
     expect(s.task).toBeUndefined()
   })
-  test('寫程式檔且仍未判定 → feature；已判定為 work 時寫程式檔不改', async () => {
+  test('寫程式檔且仍未判定 → feature', async () => {
     const s = applyClassification(emptyState(), { codeWrite: true, other: true }, 1000, S1, 'default')
     expect(s.task).toBe('feature')
     expect(s.taskSource).toBe('inferred')
+  })
+  test('先 8 次讀取被推成 work，之後寫程式檔 → 升級為 feature', async () => {
     let w = emptyState()
     for (let i = 0; i < WORK_MIN_READS; i++) w = applyClassification(w, { readOnly: true }, 1000 + i, S1, 'default')
-    w = applyClassification(w, { codeWrite: true, other: true }, 3000, S1, 'default')
     expect(w.task).toBe('work')
+    w = applyClassification(w, { codeWrite: true, other: true }, 3000, S1, 'default')
+    expect(w.task).toBe('feature')
+    expect(w.taskSource).toBe('inferred')
+  })
+  test('宣告的 work 不因寫程式檔改變', async () => {
+    let w = applySetStage(emptyState(), { task: 'work', stage: 'produce' }, 1000, S1)
+    w = applyClassification(w, { codeWrite: true, other: true }, 2000, S1, 'default')
+    expect(w.task).toBe('work')
+    expect(w.stage).toBe('produce')
+  })
+  test('明確訊號推斷的 bugfix 不被較弱訊號（/specs/ 寫入、寫程式檔）覆蓋，也不解除權威鎖', async () => {
+    let s = applyClassification(emptyState(), { task: 'bugfix', taskStrength: 'strong', authority: 'diagnose' }, 1000, S1, 'ios')
+    s = applyClassification(s, { task: 'feature', taskStrength: 'weak', guess: 'spec', codeWrite: true }, 2000, S1, 'ios')
+    expect(s.task).toBe('bugfix')
+    expect(s.stage).toBe('diagnose')
+    expect(isLocked(s, S1)).toBe(true)
+  })
+  test('同級明確訊號可以跨任務切換（bugfix → brainstorming 的 feature）', async () => {
+    let s = applyClassification(emptyState(), { task: 'bugfix', taskStrength: 'strong', authority: 'diagnose' }, 1000, S1, 'ios')
+    s = applyClassification(s, { task: 'feature', taskStrength: 'strong' }, 2000, S1, 'ios')
+    expect(s.task).toBe('feature')
+  })
+  test('TASK_SIGNAL_RANK 優先序：讀取門檻 < 弱訊號 < 明確訊號', async () => {
+    expect(TASK_SIGNAL_RANK.reads).toBeLessThan(TASK_SIGNAL_RANK.weak)
+    expect(TASK_SIGNAL_RANK.weak).toBeLessThan(TASK_SIGNAL_RANK.strong)
   })
   test('推斷換任務時重設步驟與 badge', async () => {
     let s = applyClassification(feature('impl', 0, 'old'), { badge: 'merge' }, 500, S1, 'ios')
@@ -187,6 +213,22 @@ describe('舊 store 資料相容', () => {
     expect(tf.milestone).toBe('M48')
     expect(migrateState({ stage: 'device', stageSince: 1, updatedAt: 2, source: 'guess' }).stage).toBe('accept')
     expect(migrateState({ stage: 'impl', stageSince: 1, updatedAt: 2, source: 'guess' }).task).toBe('feature')
+  })
+  test('型別錯的欄位清成預設，其餘保留', async () => {
+    const s = migrateState({
+      task: 'bugfix', taskSource: 'declared', stage: 'fix', stageSince: 1, updatedAt: 2, source: 'setstage',
+      milestone: 42, detail: {}, badges: 'merge', counts: 5, locked: 'yes', handoff: 'x', submitted: 1, sessionId: 7, taskRank: 'hi',
+    })
+    expect(s.task).toBe('bugfix')
+    expect(s.stage).toBe('fix')
+    for (const k of ['milestone', 'detail', 'badges', 'counts', 'locked', 'handoff', 'submitted', 'sessionId', 'taskRank']) {
+      expect((s as Record<string, unknown>)[k]).toBeUndefined()
+    }
+    const bad = migrateState({ stage: 'fix', stageSince: 'x', updatedAt: null, source: 'weird', task: 'bugfix', badges: ['merge', 'nope'] })
+    expect(bad.stageSince).toBe(0)
+    expect(bad.updatedAt).toBe(0)
+    expect(bad.source).toBe('none')
+    expect(bad.badges).toEqual(['merge'])
   })
   test('壞資料 → 空狀態', async () => {
     expect(migrateState(undefined)).toEqual(emptyState())

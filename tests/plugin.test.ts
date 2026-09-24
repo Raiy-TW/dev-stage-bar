@@ -198,6 +198,28 @@ describe('階段判斷（經由 hooks）', () => {
     for (let i = 0; i < 8; i++) await $.tool.call({ tool: i % 2 ? 'Read' : 'WebSearch', file_path: '/x', query: 'q' } as any)
     expect((await band($))[0]).toMatch(/^非程式 推測 ○/)
   })
+  test('store 放損壞資料：工具照常回結果、不 reject，band 仍能畫', async ($, on) => {
+    const broken = { task: 'feature', stage: 'impl', stageSince: T0, updatedAt: T0, source: 'setstage', sessionId: 'old', badges: 'merge', milestone: 42, counts: 'x' }
+    await boot($, on, { store: { [`stage:${CWD}`]: broken } })
+    for (const e of [{ tool: 'Bash', command: 'git merge x' }, { tool: 'Read', file_path: '/x' }, { tool: 'Skill', skill: 'ios-review' }]) {
+      const r: any = await $.tool.call(e as any)
+      expect(r.result).toBe(`bottom:${e.tool}`)
+    }
+    const rows = await band($)
+    expect(rows[0]).toMatch(/^新功能 /)
+  })
+  test('顯示路徑出錯（ui.invalidate 失敗）時工具仍回結果、不 reject', async ($, on) => {
+    on('ui.invalidate', () => {
+      throw new Error('boom')
+    })
+    await boot($, on)
+    for (const e of [{ tool: 'Bash', command: 'echo hi' }, { tool: 'Skill', skill: 'ios-diagnose' }, { tool: 'Read', file_path: '/x' }]) {
+      const r: any = await $.tool.call(e as any)
+      expect(r.result).toBe(`bottom:${e.tool}`)
+    }
+    const set: any = await $.tool.call({ tool: TOOL, task: 'bugfix', stage: 'fix' } as any)
+    expect(typeof set.result).toBe('string')
+  })
   test('舊版 store 的 tf 映射成 ship（ios 顯示 TF）', async ($, on) => {
     await boot($, on, { store: { [`stage:${CWD}`]: { stage: 'tf', stageSince: T0, updatedAt: T0, source: 'setstage', sessionId: 'old' } } })
     expect((await band($))[1]).toMatch(/TF · /)

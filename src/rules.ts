@@ -27,6 +27,8 @@ export type Classification = {
   submitted?: boolean
   /** 任務訊號：只在本 session 尚未宣告 task 時用來推斷任務。 */
   task?: TaskId
+  /** 任務訊號強度（見 stages.ts 的 TASK_SIGNAL_RANK）。 */
+  taskStrength?: 'strong' | 'weak'
   /** 主迴圈的讀取類呼叫（Read/Grep/…、唯讀 Bash、寫 .md）：累積到門檻推斷 work。 */
   readOnly?: boolean
   /** 主迴圈的其他動作（非唯讀 Bash、寫程式檔、Agent…）：出現就不推斷 work。 */
@@ -99,10 +101,16 @@ export function classify(e: ToolEvent): Classification {
     const auth = AUTHORITY[inv.base]
     if (auth) {
       c.authority = auth.stage
-      if (auth.task) c.task = auth.task
+      if (auth.task) {
+        c.task = auth.task
+        c.taskStrength = 'strong'
+      }
     }
     const task = TASK_SKILLS[inv.full]
-    if (task) c.task = task
+    if (task) {
+      c.task = task
+      c.taskStrength = 'strong'
+    }
     if (inv.base === 'ios-diagnose' || inv.full === 'codex:rescue') c.badge = 'debug'
     return c
   }
@@ -115,6 +123,7 @@ export function classify(e: ToolEvent): Classification {
       if (path.includes('/specs/')) {
         c.guess = 'spec'
         c.task = 'feature'
+        c.taskStrength = 'weak'
       }
       const isDoc = /\.md$/i.test(path)
       if (!isDoc) c.codeWrite = true
@@ -144,7 +153,10 @@ export function classify(e: ToolEvent): Classification {
           if (/asc submit/.test(cmd)) c.submitted = true
         } else if (RE.ship.test(cmd)) c.guess = 'ship'
         else if (RE.verify.test(cmd)) c.guess = 'verify'
-        if (RE.ghIssue.test(cmd)) c.task = 'bugfix'
+        if (RE.ghIssue.test(cmd)) {
+          c.task = 'bugfix'
+          c.taskStrength = 'strong'
+        }
         if (isReadOnlyBash(cmd)) c.readOnly = true
         else c.other = true
       }

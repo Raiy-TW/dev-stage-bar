@@ -1,5 +1,5 @@
 // 持久化的任務／步驟狀態與其轉換（純函式）。每個 cwd 一份，存在 $.store。
-import { ALL_STAGE_IDS, LEGACY_STAGE_IDS, TASKS, TASK_IDS, WORK_MIN_READS, type BadgeId, type ProjectKind, type StageId, type TaskId } from './stages.ts'
+import { ALL_STAGE_IDS, BADGES, LEGACY_STAGE_IDS, TASKS, TASK_IDS, TASK_SIGNAL_RANK, WORK_MIN_READS, type BadgeId, type ProjectKind, type StageId, type TaskId } from './stages.ts'
 import type { Classification } from './rules.ts'
 import { hasStage, isTaskId, stageIds, tasksWithStage } from './tasks.ts'
 
@@ -9,6 +9,8 @@ export type TaskSource = 'declared' | 'inferred'
 export type StageState = {
   task?: TaskId
   taskSource?: TaskSource
+  /** 推斷出的任務所依據的訊號強度（TASK_SIGNAL_RANK）；宣告的任務沒有這欄。 */
+  taskRank?: number
   stage: StageId | null
   detail?: string
   milestone?: string
@@ -49,11 +51,33 @@ function withStage(s: StageState, stage: StageId, now: number): StageState {
   return { ...rest, stage, stageSince: now }
 }
 
-/** 換任務：整條重來（步驟、計時、detail、badge 都重設）。 */
-function withTask(s: StageState, task: TaskId, source: TaskSource, now: number): StageState {
-  if (s.task === task) return s.taskSource === source ? s : { ...s, taskSource: source }
-  const { detail: _d, submitted: _s, badges: _b, locked: _l, ...rest } = s
-  return { ...rest, task, taskSource: source, stage: null, stageSince: now }
+/** 換任務：整條重來（步驟、計時、detail、badge 都重設）。rank 只給推斷的任務。 */
+function withTask(s: StageState, task: TaskId, source: TaskSource, now: number, rank?: number): StageState {
+  if (s.task === task) {
+    if (source === 'declared') {
+      if (s.taskSource === 'declared') return s
+      const { taskRank: _r, ...rest } = s
+      return { ...rest, taskSource: 'declared' }
+    }
+    return rank !== undefined && rank > (s.taskRank ?? 0) && s.taskSource === 'inferred' ? { ...s, taskRank: rank } : s
+  }
+  const { detail: _d, submitted: _s, badges: _b, locked: _l, taskRank: _r, ...rest } = s
+  return { ...rest, task, taskSource: source, stage: null, stageSince: now, ...(source === 'inferred' && rank !== undefined ? { taskRank: rank } : {}) }
+}
+
+/** 目前任務的強度：本 session 宣告的不可被推斷覆蓋；上個 session 宣告的算 strong。 */
+function currentRank(s: StageState, sessionId: string): number {
+  if (!s.task) return 0
+  if (taskDeclared(s, sessionId)) return Number.POSITIVE_INFINITY
+  if (s.taskSource === 'declared') return TASK_SIGNAL_RANK.strong
+  return s.taskRank ?? TASK_SIGNAL_RANK.strong
+}
+
+/** 推斷的任務切換：較強的訊號可覆蓋較弱推斷的任務；同為 strong 可跨任務切換。 */
+function canSwitch(s: StageState, task: TaskId, rank: number, sessionId: string): boolean {
+  if (task === s.task) return false
+  const cur = currentRank(s, sessionId)
+  return rank > cur || (rank === cur && rank === TASK_SIGNAL_RANK.strong)
 }
 
 /** 累加本 session 的讀取／其他計數；不算「更新」（不動 sessionId／updatedAt，避免「上次更新」被讀檔刷新）。 */
@@ -72,12 +96,15 @@ export function applyClassification(prev: StageState, c: Classification, now: nu
   const reads = s.counts?.reads ?? 0
   const others = s.counts?.others ?? 0
 
-  // 任務推斷：本 session 尚未宣告 task 時才做。
-  if (!taskDeclared(s, sessionId)) {
-    if (c.task && c.task !== s.task) s = withTask(s, c.task, 'inferred', now)
-    else if (!s.task && c.codeWrite) s = withTask(s, 'feature', 'inferred', now)
-    else if (!s.task && others === 0 && reads >= WORK_MIN_READS) s = withTask(s, 'work', 'inferred', now)
-  }
+  // 任務推斷：依訊號強度（TASK_SIGNAL_RANK）決定能否切換。
+  const candidate: { task: TaskId; rank: number } | undefined = c.task
+    ? { task: c.task, rank: c.taskStrength === 'weak' ? TASK_SIGNAL_RANK.weak : TASK_SIGNAL_RANK.strong }
+    : c.codeWrite
+      ? { task: 'feature', rank: TASK_SIGNAL_RANK.weak }
+      : others === 0 && reads >= WORK_MIN_READS
+        ? { task: 'work', rank: TASK_SIGNAL_RANK.reads }
+        : undefined
+  if (candidate && canSwitch(s, candidate.task, candidate.rank, sessionId)) s = withTask(s, candidate.task, 'inferred', now, candidate.rank)
 
   // 步驟：依目前任務查表，查不到就不改。
   const fits = (stage: StageId | undefined): stage is StageId => !!stage && !!s.task && hasStage(s.task, stage, project)
@@ -124,20 +151,58 @@ export function applySetStage(prev: StageState, input: SetStageInput, now: numbe
   return next
 }
 
-/** 讀 store：驗證形狀，0.1 版的 tf／device 映射成 ship／accept，沒有 task 的舊資料視為 feature。 */
+const STAGE_SOURCES: readonly StageSource[] = ['none', 'guess', 'authority', 'setstage']
+const TASK_SOURCES: readonly TaskSource[] = ['declared', 'inferred']
+const HANDOFFS = ['load', 'save'] as const
+
+const str = (v: unknown): string | undefined => (typeof v === 'string' && v ? v : undefined)
+const num = (v: unknown): number | undefined => (typeof v === 'number' && Number.isFinite(v) ? v : undefined)
+const bool = (v: unknown): boolean | undefined => (typeof v === 'boolean' ? v : undefined)
+const oneOf = <T extends string>(v: unknown, xs: readonly T[]): T | undefined => (xs as readonly unknown[]).includes(v) ? (v as T) : undefined
+
+/**
+ * 讀 store：逐欄驗證型別，不合法的欄位清成預設（store 可能被舊版或手動改壞）。
+ * 0.1 版的 tf／device 映射成 ship／accept；沒有 task 的舊資料視為 feature。
+ */
 export function migrateState(v: unknown): StageState {
   if (typeof v !== 'object' || v === null || !('stage' in v) || !('stageSince' in v)) return emptyState()
-  const raw = v as StageState & { stage: string | null }
-  const stage = raw.stage === null ? null : (LEGACY_STAGE_IDS[raw.stage] ?? raw.stage)
-  const known = stage !== null && (ALL_STAGE_IDS as readonly string[]).includes(stage)
-  const s: StageState = { ...raw, stage: known ? (stage as StageId) : null }
-  if (!isTaskId(s.task)) {
-    delete s.task
-    delete s.taskSource
-    if (s.stage) {
-      s.task = 'feature'
-      s.taskSource = raw.source === 'setstage' ? 'declared' : 'inferred'
-    }
+  const raw = v as Record<string, unknown>
+  const rawStage = typeof raw.stage === 'string' ? (LEGACY_STAGE_IDS[raw.stage] ?? raw.stage) : null
+  const stage = rawStage !== null && (ALL_STAGE_IDS as readonly string[]).includes(rawStage) ? (rawStage as StageId) : null
+  const source = oneOf(raw.source, STAGE_SOURCES) ?? 'none'
+  const s: StageState = { stage, stageSince: num(raw.stageSince) ?? 0, updatedAt: num(raw.updatedAt) ?? 0, source }
+
+  if (isTaskId(raw.task)) {
+    s.task = raw.task
+    const ts = oneOf(raw.taskSource, TASK_SOURCES)
+    if (ts) s.taskSource = ts
+    const rank = num(raw.taskRank)
+    if (rank !== undefined && ts === 'inferred') s.taskRank = rank
+  } else if (stage) {
+    s.task = 'feature'
+    s.taskSource = source === 'setstage' ? 'declared' : 'inferred'
+  }
+  const detail = str(raw.detail)
+  if (detail) s.detail = detail
+  const milestone = str(raw.milestone)
+  if (milestone) s.milestone = milestone
+  const sessionId = str(raw.sessionId)
+  if (sessionId) s.sessionId = sessionId
+  const locked = bool(raw.locked)
+  if (locked !== undefined) s.locked = locked
+  const declared = bool(raw.taskDeclared)
+  if (declared !== undefined) s.taskDeclared = declared
+  const submitted = bool(raw.submitted)
+  if (submitted !== undefined) s.submitted = submitted
+  const handoff = oneOf(raw.handoff, HANDOFFS)
+  if (handoff) s.handoff = handoff
+  if (Array.isArray(raw.badges)) {
+    const badges = raw.badges.filter((b): b is BadgeId => (BADGES as readonly unknown[]).includes(b))
+    if (badges.length) s.badges = badges
+  }
+  const c = raw.counts as Record<string, unknown> | null | undefined
+  if (typeof c === 'object' && c !== null && str(c.sessionId) && num(c.reads) !== undefined && num(c.others) !== undefined) {
+    s.counts = { sessionId: c.sessionId as string, reads: c.reads as number, others: c.others as number }
   }
   return s
 }

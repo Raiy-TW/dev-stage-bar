@@ -89,12 +89,19 @@ async function flush($: $): Promise<void> {
   await $.store.set(storeKey(cwd), state)
 }
 
-/** 內容有變才 invalidate（頻繁 invalidate 會閃爍）。同步、不等任何 $ 回應。 */
+/**
+ * 內容有變才 invalidate（頻繁 invalidate 會閃爍）。同步、不等任何 $ 回應。
+ * 永不拋錯：它會在工具路徑上 next(e) 之後被呼叫，排版出錯不能讓 hook reject、吃掉工具結果。
+ */
 function invalidateIfChanged($: $, now: number): void {
-  const sig = signature(now)
-  if (sig === lastSignature) return
-  lastSignature = sig
-  $.ui.invalidate('ui.render')
+  try {
+    const sig = signature(now)
+    if (sig === lastSignature) return
+    lastSignature = sig
+    $.ui.invalidate('ui.render')
+  } catch {
+    // 只影響顯示。
+  }
 }
 
 /** tick：更新 subagent 清單、寫 store、必要時 invalidate。只在 timer 與 session.start 跑，不在工具路徑上。 */
