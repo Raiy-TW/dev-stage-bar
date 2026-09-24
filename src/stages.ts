@@ -17,8 +17,8 @@ export type StageId = (typeof STAGES)[number]['id']
 
 export const STAGE_IDS: readonly StageId[] = STAGES.map(s => s.id)
 
-/** 頭尾圖示（不佔格）：/load 接手、/save 交接完成。 */
-export const HANDOFF_GLYPH = { load: '載', save: '存' } as const
+/** 進度條的點與連接線：已過 ●━、目前 ◉、未到 ○┄。 */
+export const GLYPHS = { done: '●', current: '◉', todo: '○', doneLine: '━', todoLine: '┄' } as const
 
 /** 可選活動 badge（第二行，本 session 有發生才顯示）。 */
 export const BADGES = ['design', 'upgrade', 'mutation', 'debug', 'merge'] as const
@@ -42,8 +42,11 @@ export const THRESHOLDS = {
 /** 重新計算畫面的週期（毫秒）；內容沒變不會 invalidate。 */
 export const TICK_MS = 20_000
 
-/** 寬度低於此值改用窄版第一行。 */
-export const NARROW_COLUMNS = 90
+/** 寬度低於此值（或點距不到 1 格）改用單行窄版 ●●●●◉○○○○ 驗證 · 12m。 */
+export const NARROW_COLUMNS = 40
+
+/** 點線進度條右側保留的邊距（欄）。 */
+export const SAFETY_MARGIN = 1
 
 /** Macaron 色系（對應 statusline.sh 的 soft blue / green / lemon / coral）。 */
 export const COLORS = {
