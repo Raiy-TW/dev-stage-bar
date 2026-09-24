@@ -19,8 +19,8 @@ describe('權威轉換', () => {
     expect(classify({ tool: 'Skill', skill: 'ios-sim-verify' }).authority).toBe('verify')
     expect(classify({ tool: 'Workflow', name: 'ios-sim-verify' }).authority).toBe('verify')
   })
-  test('ios-to-tf → tf；ios-submit → submit', async () => {
-    expect(classify({ tool: 'Skill', skill: 'ios-to-tf' }).authority).toBe('tf')
+  test('ios-to-tf → ship；ios-submit → submit', async () => {
+    expect(classify({ tool: 'Skill', skill: 'ios-to-tf' }).authority).toBe('ship')
     expect(classify({ tool: 'Skill', skill: 'ios-submit' }).authority).toBe('submit')
   })
   test('反例：其他 skill 不是權威轉換', async () => {
@@ -29,9 +29,12 @@ describe('權威轉換', () => {
     expect(c.handoff).toBeUndefined()
     expect(classify({ tool: 'Skill', skill: 'ios-review-notes' }).authority).toBeUndefined()
   })
-  test('ios-diagnose（Skill 或 Workflow）→ debug badge', async () => {
-    expect(classify({ tool: 'Skill', skill: 'ios-diagnose' }).badge).toBe('debug')
-    expect(classify({ tool: 'Workflow', name: 'ios-diagnose' }).badge).toBe('debug')
+  test('ios-diagnose（Skill 或 Workflow）→ debug badge＋bugfix/diagnose', async () => {
+    for (const c of [classify({ tool: 'Skill', skill: 'ios-diagnose' }), classify({ tool: 'Workflow', name: 'ios-diagnose' })]) {
+      expect(c.badge).toBe('debug')
+      expect(c.task).toBe('bugfix')
+      expect(c.authority).toBe('diagnose')
+    }
   })
 })
 
@@ -77,7 +80,7 @@ describe('推測：主迴圈 Bash', () => {
   })
   test('tf 指令', async () => {
     for (const c of ['asc builds upload x.ipa', 'asc publish testflight', 'asc xcode archive', 'agvtool next-version -all']) {
-      expect(classify({ tool: 'Bash', command: c }).guess).toBe('tf')
+      expect(classify({ tool: 'Bash', command: c }).guess).toBe('ship')
     }
   })
   test('submit 指令並標記已送出', async () => {
@@ -132,5 +135,47 @@ describe('標籤', () => {
     expect(agentShortName('Review M48 T2')).toBe('T2 review')
     expect(agentShortName('Bank A: split data')).toBe('Bank A')
     expect(agentShortName('Explore the whole codebase quickly')).toBe('Explore the w…')
+  })
+})
+
+describe('任務訊號', () => {
+  test('bugfix：systematic-debugging、gh issue', async () => {
+    expect(classify({ tool: 'Skill', skill: 'superpowers:systematic-debugging' }).task).toBe('bugfix')
+    expect(classify({ tool: 'Bash', command: 'gh issue view 12' }).task).toBe('bugfix')
+    expect(classify({ tool: 'Bash', command: 'gh pr view 12' }).task).toBeUndefined()
+  })
+  test('feature：brainstorming、寫 /specs/', async () => {
+    expect(classify({ tool: 'Skill', skill: 'superpowers:brainstorming' }).task).toBe('feature')
+    expect(classify({ tool: 'Write', file_path: '/p/docs/specs/a.md' }).task).toBe('feature')
+    expect(classify({ tool: 'Skill', skill: 'superpowers:writing-plans' }).task).toBeUndefined()
+  })
+  test('讀取類：Read/Grep/Glob/WebFetch/WebSearch/ToolSearch、唯讀 Bash、寫 .md', async () => {
+    for (const tool of ['Read', 'Grep', 'Glob', 'WebFetch', 'WebSearch', 'ToolSearch']) expect(classify({ tool }).readOnly).toBe(true)
+    for (const command of ['ls -la', 'git status', 'cat a | head -3', 'rg foo src', 'git log --oneline']) expect(classify({ tool: 'Bash', command }).readOnly).toBe(true)
+    expect(classify({ tool: 'Write', file_path: '/p/notes.md' }).readOnly).toBe(true)
+    expect(classify({ tool: 'Edit', file_path: '/p/README.md' }).readOnly).toBe(true)
+  })
+  test('其他動作：非唯讀 Bash、寫程式檔、Agent', async () => {
+    for (const command of ['npm test', 'rm x', 'echo hi > f.txt', 'git commit -m x']) {
+      const c = classify({ tool: 'Bash', command })
+      expect(c.readOnly).toBeFalsy()
+      expect(c.other).toBe(true)
+    }
+    const w = classify({ tool: 'Edit', file_path: '/p/src/App.swift' })
+    expect(w.codeWrite).toBe(true)
+    expect(w.other).toBe(true)
+    expect(classify({ tool: 'Agent', description: 'Explore x' }).other).toBe(true)
+  })
+  test('subagent 內的呼叫不計入讀取／其他（只算主迴圈）', async () => {
+    const c = classify({ tool: 'Read', agentId: 'a1' })
+    expect(c.readOnly).toBeFalsy()
+    expect(classify({ tool: 'Bash', command: 'npm test', agentId: 'a1' }).other).toBeFalsy()
+  })
+  test('中性工具（AskUserQuestion、TodoWrite、Skill 無訊號）不算讀取也不算其他', async () => {
+    for (const e of [{ tool: 'AskUserQuestion' }, { tool: 'TodoWrite' }, { tool: 'Skill', skill: 'humanizer-zh-tw' }]) {
+      const c = classify(e)
+      expect(c.readOnly).toBeFalsy()
+      expect(c.other).toBeFalsy()
+    }
   })
 })

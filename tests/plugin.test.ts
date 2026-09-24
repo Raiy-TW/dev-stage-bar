@@ -66,23 +66,30 @@ async function band($: any, over: Record<string, unknown> = {}): Promise<string[
 }
 
 describe('啟用條件', () => {
-  test('非 iOS 專案：不註冊 SetStage、不畫', async ($, on) => {
+  test('非 iOS 專案也啟用：註冊 SetStage、畫「判斷任務中…」', async ($, on) => {
     const { registered } = await boot($, on, { ios: false })
-    expect(registered).not.toContain('SetStage')
-    const ui = await $.ui.mount({ plugin: PLUGIN, surface: 'terminal', component: 'AbovePrompt', props: PROPS() as any })
-    expect(await ui.find({ type: 'Text', text: /需求/ })).toBeUndefined()
+    expect(registered).toContain('SetStage')
+    expect(await band($)).toEqual(['判斷任務中…'])
   })
-  test('iOS 專案：註冊 SetStage 並畫進度條', async ($, on) => {
+  test('iOS 專案：註冊 SetStage；未判定任務時畫「判斷任務中…」', async ($, on) => {
     const { registered } = await boot($, on)
     expect(registered).toContain('SetStage')
+    expect(await band($)).toEqual(['判斷任務中…'])
+  })
+  test('非 iOS 專案 feature 用 default 標籤：8 點、ship=部署', async ($, on) => {
+    await boot($, on, { ios: false })
+    const r: any = await $.tool.call({ tool: TOOL, task: 'feature', stage: 'ship' } as any)
+    expect(r.result).toContain('部署')
     const rows = await band($)
-    expect(rows[0]).toMatch(/^○┄+○/)
-    expect(rows).toHaveLength(1)
+    expect((rows[0]!.match(/[●◉○]/g) ?? []).length).toBe(8)
+    expect(rows[1]?.trim()).toBe('部署 · 0m')
+    const bad: any = await $.tool.call({ tool: TOOL, stage: 'submit' } as any)
+    expect(bad.result).toContain('intent, spec, plan, impl, verify, review, ship, accept')
   })
   test('每列是一個 truncate-end 的 Text（寬度估錯時截斷，不折行）', async ($, on) => {
     await boot($, on)
     const ui = await $.ui.mount({ plugin: PLUGIN, surface: 'terminal', component: 'AbovePrompt', props: PROPS() as any })
-    const row = await ui.find({ type: 'Text', text: /○/ })
+    const row = await ui.find({ type: 'Text', text: /判斷任務中/ })
     expect(row?.props.wrap).toBe('truncate-end')
     await ui.unmount()
   })
@@ -95,11 +102,11 @@ describe('啟用條件', () => {
 describe('SetStage 與放行', () => {
   test('SetStage 回字串並顯示 milestone/detail', async ($, on) => {
     await boot($, on)
-    const r: any = await $.tool.call({ tool: TOOL, stage: 'verify', detail: 'T3/5', milestone: 'M48' } as any)
+    const r: any = await $.tool.call({ tool: TOOL, task: 'feature', stage: 'verify', detail: 'T3/5', milestone: 'M48' } as any)
     expect(typeof r.result).toBe('string')
     expect(r.result).toContain('驗證')
     const rows = await band($)
-    expect(rows[0]).toMatch(/●━+.*◉┄+.*M48$/)
+    expect(rows[0]).toMatch(/^新功能 ●━+.*◉┄+.*M48$/)
     expect(rows[1]?.trim()).toBe('驗證 · T3/5 · 0m')
   })
   test('SetStage 的工具名取自 $.tool.register 的回傳值', async ($, on) => {
@@ -121,7 +128,7 @@ describe('SetStage 與放行', () => {
   })
   test('/clear 後（session.start 不重跑）turn.start 換新 session id，上個 session 的鎖失效', async ($, on) => {
     const { clearSession } = await boot($, on, { ids: ['sess-1', 'sess-2'] })
-    await $.tool.call({ tool: TOOL, stage: 'impl' } as any)
+    await $.tool.call({ tool: TOOL, task: 'feature', stage: 'impl' } as any)
     await $.tool.call({ tool: 'Bash', command: 'xcodebuild test -scheme A' } as any)
     expect((await band($))[1]).toMatch(/實作 · \d+m/)
     clearSession()
@@ -131,8 +138,25 @@ describe('SetStage 與放行', () => {
   })
   test('SetStage 未知階段回說明字串', async ($, on) => {
     await boot($, on)
-    const r: any = await $.tool.call({ tool: TOOL, stage: 'ship' } as any)
+    const r: any = await $.tool.call({ tool: TOOL, stage: 'deploy' } as any)
     expect(r.result).toContain('未知的階段')
+  })
+  test('SetStage 沒有任務且 stage 不唯一 → 請帶 task；不合法 stage → 列出合法值且不改狀態', async ($, on) => {
+    await boot($, on)
+    const amb: any = await $.tool.call({ tool: TOOL, stage: 'review' } as any)
+    expect(amb.result).toContain('task')
+    await $.tool.call({ tool: TOOL, task: 'bugfix', stage: 'diagnose' } as any)
+    const bad: any = await $.tool.call({ tool: TOOL, stage: 'spec' } as any)
+    expect(bad.result).toContain('reproduce, diagnose, red, fix, verify, review, ship')
+    expect((await band($))[1]?.trim()).toBe('診斷 · 0m')
+  })
+  test('SetStage 帶新 task → 換整條', async ($, on) => {
+    await boot($, on)
+    await $.tool.call({ tool: TOOL, task: 'feature', stage: 'impl' } as any)
+    await $.tool.call({ tool: TOOL, task: 'work', stage: 'research' } as any)
+    const rows = await band($)
+    expect(rows[0]).toMatch(/^非程式 /)
+    expect((rows[0]!.match(/[●◉○]/g) ?? []).length).toBe(5)
   })
   test('一般工具的結果原封不動放行', async ($, on) => {
     await boot($, on)
@@ -143,21 +167,40 @@ describe('SetStage 與放行', () => {
 
 describe('階段判斷（經由 hooks）', () => {
   test('權威轉換覆蓋推測', async ($, on) => {
-    await boot($, on)
+    await boot($, on, { store: { [`stage:${CWD}`]: { task: 'feature', stage: 'impl', stageSince: T0, updatedAt: T0, source: 'setstage', sessionId: 'old' } } })
     await $.tool.call({ tool: 'Skill', skill: 'ios-review' } as any)
     await $.tool.call({ tool: 'Bash', command: 'xcodebuild test -scheme A' } as any)
     const rows = await band($)
     expect(rows[1]).toMatch(/審查 · \d+m/)
   })
   test('無權威時主迴圈 xcodebuild test 推測為驗證', async ($, on) => {
-    await boot($, on)
+    await boot($, on, { store: { [`stage:${CWD}`]: { task: 'bugfix', stage: 'fix', stageSince: T0, updatedAt: T0, source: 'setstage', sessionId: 'old' } } })
     await $.tool.call({ tool: 'Bash', command: 'xcodebuild test -scheme A' } as any)
     expect((await band($))[1]).toMatch(/驗證 · \d+m/)
   })
   test('subagent 內的 xcodebuild test 不改階段', async ($, on) => {
-    await boot($, on, { agents: [{ id: 'a1', description: 'M48 T3 add parser', type: 'general-purpose', status: 'running' }] })
+    await boot($, on, {
+      agents: [{ id: 'a1', description: 'M48 T3 add parser', type: 'general-purpose', status: 'running' }],
+      store: { [`stage:${CWD}`]: { task: 'bugfix', stage: 'fix', stageSince: T0, updatedAt: T0, source: 'setstage', sessionId: 'old' } },
+    })
     await $.tool.call({ tool: 'Bash', command: 'xcodebuild test -scheme A', agentId: 'a1' } as any)
-    expect((await band($))[0]).not.toMatch(/[●◉]/)
+    expect((await band($))[1]).toMatch(/修正 · /)
+  })
+  test('ios-diagnose 在未宣告任務時一併設定 bugfix/diagnose（推測）', async ($, on) => {
+    await boot($, on)
+    await $.tool.call({ tool: 'Skill', skill: 'ios-diagnose' } as any)
+    const rows = await band($)
+    expect(rows[0]).toMatch(/^修bug 推測 ●━+◉/)
+    expect(rows[1]?.trim()).toMatch(/^診斷 · /)
+  })
+  test('work 推斷：主迴圈連續讀取類呼叫達門檻', async ($, on) => {
+    await boot($, on, { ios: false })
+    for (let i = 0; i < 8; i++) await $.tool.call({ tool: i % 2 ? 'Read' : 'WebSearch', file_path: '/x', query: 'q' } as any)
+    expect((await band($))[0]).toMatch(/^非程式 推測 ○/)
+  })
+  test('舊版 store 的 tf 映射成 ship（ios 顯示 TF）', async ($, on) => {
+    await boot($, on, { store: { [`stage:${CWD}`]: { stage: 'tf', stageSince: T0, updatedAt: T0, source: 'setstage', sessionId: 'old' } } })
+    expect((await band($))[1]).toMatch(/TF · /)
   })
   test('上次 session 的階段顯示「上次更新」', async ($, on) => {
     const saved = { stage: 'impl', stageSince: T0 - 5 * 60 * MIN, updatedAt: T0 - 3 * 60 * MIN, source: 'setstage', sessionId: 'old' }

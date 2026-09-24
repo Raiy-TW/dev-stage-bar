@@ -1,10 +1,11 @@
-// dev-stage-bar：在 iOS 專案的 prompt 上方畫階段進度條與即時活動。
+// dev-stage-bar：在 prompt 上方畫「任務類型 × 步驟」進度條與即時活動（所有專案）。
 // 原則：本 plugin 只觀察，永遠 `next(e)` 放行，不擋、不改寫任何工具；
 // 自己的邏輯出錯只影響顯示（全部包在 try/catch 裡）。
 import type { EngineInterface, Register } from 'claude-code'
-import { STAGES, STAGE_IDS, THRESHOLDS, TICK_MS, type StageId } from '../src/stages.ts'
+import { ALL_STAGE_IDS, TASKS, TASK_IDS, THRESHOLDS, TICK_MS, type ProjectKind } from '../src/stages.ts'
+import { stageIds, stagesFor } from '../src/tasks.ts'
 import { agentShortName, callLabel, classify, type ToolEvent } from '../src/rules.ts'
-import { applyClassification, applySetStage, emptyState, type StageState } from '../src/state.ts'
+import { applyClassification, applySetStage, emptyState, migrateState, resolveSetStage, type StageState } from '../src/state.ts'
 import { renderLines, lineText, type Activity, type AgentRow, type InFlight, type Line, type Thresholds } from '../src/format.ts'
 
 const SET_STAGE = 'SetStage'
@@ -21,6 +22,7 @@ type $ = EngineInterface
 let enabled = false
 let cwd = ''
 let sessionId = ''
+let project: ProjectKind = 'default'
 /** $.tool.register 回傳的完整工具名（mcp__<plugin>__SetStage）。 */
 let setStageTool = ''
 let state: StageState = emptyState()
@@ -48,21 +50,20 @@ const nowSync = (): number => clockBase + Math.floor((Date.now() - realBase) / 1
 const storeKey = (dir: string): string => `stage:${dir}`
 const ignore = (): undefined => undefined
 
-async function detectIos($: $, dir: string): Promise<boolean> {
-  const entries = await $.fs.list(dir)
-  const hasProject = entries.some(e => /\.(xcodeproj|xcworkspace)$/.test(e.name))
-  // 以 .xcodeproj／.xcworkspace 或 .asc/ 為主；Package.swift 需搭配 .asc/ 才算（已被 .asc 涵蓋）。
-  const hasAsc = entries.some(e => e.name === '.asc')
-  return hasProject || hasAsc
+/** 專案類型：*.xcodeproj／*.xcworkspace／.asc → ios，其餘 default（只影響少數標籤）。 */
+async function detectProject($: $, dir: string): Promise<ProjectKind> {
+  try {
+    const entries = await $.fs.list(dir)
+    const ios = entries.some(e => /\.(xcodeproj|xcworkspace)$/.test(e.name) || e.name === '.asc')
+    return ios ? 'ios' : 'default'
+  } catch {
+    return 'default'
+  }
 }
 
 function parseMinutes(raw: string | undefined, fallback: number): number {
   const n = raw === undefined ? NaN : Number(raw)
   return Number.isFinite(n) && n > 0 ? n : fallback
-}
-
-function isStageState(v: unknown): v is StageState {
-  return typeof v === 'object' && v !== null && 'stage' in v && 'stageSince' in v
 }
 
 function activity(now: number): Activity {
@@ -71,7 +72,7 @@ function activity(now: number): Activity {
 
 function signature(now: number): string {
   const act = activity(now)
-  return SIGNATURE_COLUMNS.map(columns => renderLines(state, act, { sessionId, columns, maxRows: 2, th }).map(lineText).join('\n')).join('\n--\n')
+  return SIGNATURE_COLUMNS.map(columns => renderLines(state, act, { sessionId, columns, maxRows: 2, th, project }).map(lineText).join('\n')).join('\n--\n')
 }
 
 /** 同步更新狀態；寫 store 延到 tick（或 session 結束）才做，工具路徑上不碰 $.store。 */
@@ -135,7 +136,7 @@ type CallEvent = ToolEvent & { tool_use_id: string }
 function onCallStart(e: CallEvent): void {
   const now = nowSync()
   markEvent(e.agentId ?? MAIN, now)
-  persist(applyClassification(state, classify(e), now, sessionId))
+  persist(applyClassification(state, classify(e), now, sessionId, project))
   const call: InFlight = { id: e.tool_use_id, tool: e.tool, label: callLabel(e), startedAt: now }
   if (e.agentId) call.agentId = e.agentId
   calls.set(e.tool_use_id, call)
@@ -156,34 +157,34 @@ function onCallEnd(e: CallEvent, result: unknown): void {
 }
 
 function onSetStage(e: Record<string, unknown>): string {
-  const stage = e.stage
-  if (typeof stage !== 'string' || !STAGE_IDS.includes(stage as StageId)) {
-    return `未知的階段「${String(stage)}」；可用：${STAGE_IDS.join(', ')}`
-  }
+  const resolved = resolveSetStage(state, { task: e.task, stage: e.stage }, project)
+  if ('error' in resolved) return resolved.error
   const now = nowSync()
   markEvent(typeof e.agentId === 'string' ? e.agentId : MAIN, now)
-  const input: { stage: StageId; detail?: string; milestone?: string } = { stage: stage as StageId }
+  const input: { task: typeof resolved.task; stage: typeof resolved.stage; detail?: string; milestone?: string } = { ...resolved }
   if (typeof e.detail === 'string' && e.detail) input.detail = e.detail
   if (typeof e.milestone === 'string' && e.milestone) input.milestone = e.milestone
   persist(applySetStage(state, input, now, sessionId))
-  const label = STAGES.find(s => s.id === stage)?.label ?? stage
-  return `階段已設為 ${label}（${stage}）${input.detail ? ` · ${input.detail}` : ''}${input.milestone ? ` · ${input.milestone}` : ''}`
+  const label = stagesFor(resolved.task, project).find(s => s.id === resolved.stage)?.label ?? resolved.stage
+  return `已設為 ${TASKS[resolved.task].label} · ${label}（${resolved.stage}）${input.detail ? ` · ${input.detail}` : ''}${input.milestone ? ` · ${input.milestone}` : ''}`
 }
 
-const SET_STAGE_DESCRIPTION = [
-  '宣告目前 iOS 開發流程所在的階段，顯示在使用者 prompt 上方的進度條。',
-  '在進入新階段、或同階段進度有變（例如完成第 3 棒）時呼叫；只影響顯示，不改任何檔案。',
-  `stage 可用：${STAGES.map(s => `${s.id}=${s.label}`).join('、')}。`,
-  'detail 是簡短進度（例如 "T3/5"），milestone 是里程碑代號（例如 "M48"）。',
-].join('\n')
+/** 給模型看的使用規則：這是所有專案的模型知道要宣告進度的唯一管道，寫精簡。 */
+function setStageDescription(kind: ProjectKind): string {
+  return [
+    '宣告目前任務與步驟，顯示在使用者 prompt 上方的進度條（只影響顯示）。',
+    '接到新任務時先呼叫一次並帶 task（feature 新功能／bugfix 修 bug／work 研究、規劃、文件等非程式工作）；之後每進入一個步驟再呼叫一次；任務換了就帶新的 task。',
+    ...TASK_IDS.map(t => `${t}: ${stageIds(t, kind).join(', ')}`),
+    'detail 是簡短進度（例如 "T3/5"），milestone 是里程碑代號（例如 "M48"）。',
+  ].join('\n')
+}
 
 export const register: Register = on => {
   on('session.start', async ($, e, next) => {
     const r = await next(e)
     try {
       cwd = await $.session.cwd()
-      enabled = await detectIos($, cwd)
-      if (!enabled) return r
+      project = await detectProject($, cwd)
       sessionId = await $.session.id()
       noteClock(await $.clock.now())
       th = {
@@ -192,14 +193,15 @@ export const register: Register = on => {
         stuckIdleMin: parseMinutes(await $.env.get('DEV_STAGE_BAR_IDLE_MIN'), THRESHOLDS.stuckIdleMin),
       }
       const saved = await $.store.get(storeKey(cwd))
-      state = isStageState(saved) ? saved : emptyState()
+      state = migrateState(saved)
       const reg = await $.tool.register({
         name: SET_STAGE,
-        description: SET_STAGE_DESCRIPTION,
+        description: setStageDescription(project),
         inputSchema: {
           type: 'object',
           properties: {
-            stage: { type: 'string', enum: [...STAGE_IDS] },
+            task: { type: 'string', enum: [...TASK_IDS], description: '任務類型；新任務或換任務時必帶' },
+            stage: { type: 'string', enum: [...ALL_STAGE_IDS], description: '目前步驟（須屬於該任務）' },
             detail: { type: 'string', description: '簡短進度，例如 T3/5' },
             milestone: { type: 'string', description: '里程碑代號，例如 M48' },
           },
@@ -207,6 +209,7 @@ export const register: Register = on => {
         },
       })
       setStageTool = reg?.tool ?? ''
+      enabled = true
       $.clock.every(TICK_MS, () => {
         refresh($).catch(ignore)
       })
@@ -320,7 +323,7 @@ export const register: Register = on => {
       if (e.props.isWorking !== isWorking) isWorking = e.props.isWorking
       const now = noteClock(await $.clock.now())
       const columns = Math.max(1, e.props.bodyColumns - SAFETY_COLUMNS)
-      const lines: Line[] = renderLines(state, activity(now), { sessionId, columns, maxRows: e.props.maxRows, th })
+      const lines: Line[] = renderLines(state, activity(now), { sessionId, columns, maxRows: e.props.maxRows, th, project })
       const { Box, Text } = $.ui.resolve(e)
       // 每列一個 truncate-end 的 Text：寬度估算只是盡力（ambiguous-width 字元在某些終端佔 2 欄），估錯時截斷不折行。
       const tree = Box({

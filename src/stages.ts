@@ -1,21 +1,66 @@
 // 階段資料：想改標籤、順序、門檻、配色就改這個檔，邏輯不用動。
 
-/** 進度條 9 格，順序即流程順序（每輪一定經過）。 */
-export const STAGES = [
-  { id: 'intent', label: '需求' },
-  { id: 'spec', label: '規格' },
-  { id: 'plan', label: '拆解' },
-  { id: 'impl', label: '實作' },
-  { id: 'verify', label: '驗證' },
-  { id: 'review', label: '審查' },
-  { id: 'tf', label: 'TF' },
-  { id: 'device', label: '真機' },
-  { id: 'submit', label: '送審' },
-] as const
+/** 任務類型：每種任務一張步驟表（每步一個點），順序即流程順序。 */
+export const TASKS = {
+  feature: {
+    label: '新功能',
+    stages: [
+      { id: 'intent', label: '需求' },
+      { id: 'spec', label: '規格' },
+      { id: 'plan', label: '拆解' },
+      { id: 'impl', label: '實作' },
+      { id: 'verify', label: '驗證' },
+      { id: 'review', label: '審查' },
+      { id: 'ship', label: '出貨' },
+      { id: 'accept', label: '驗收' },
+      { id: 'submit', label: '送審' },
+    ],
+  },
+  bugfix: {
+    label: '修bug',
+    stages: [
+      { id: 'reproduce', label: '重現' },
+      { id: 'diagnose', label: '診斷' },
+      { id: 'red', label: '紅測試' },
+      { id: 'fix', label: '修正' },
+      { id: 'verify', label: '驗證' },
+      { id: 'review', label: '審查' },
+      { id: 'ship', label: '出貨' },
+    ],
+  },
+  work: {
+    label: '非程式',
+    stages: [
+      { id: 'clarify', label: '釐清' },
+      { id: 'research', label: '研究' },
+      { id: 'produce', label: '產出' },
+      { id: 'review', label: '審查' },
+      { id: 'deliver', label: '交付' },
+    ],
+  },
+} as const
 
-export type StageId = (typeof STAGES)[number]['id']
+export type TaskId = keyof typeof TASKS
+export const TASK_IDS = Object.keys(TASKS) as TaskId[]
+export type StageId = (typeof TASKS)[TaskId]['stages'][number]['id']
+/** 三張表合併的所有 stage id（去重，保持出現順序）。 */
+export const ALL_STAGE_IDS: readonly StageId[] = [...new Set(TASK_IDS.flatMap(t => TASKS[t].stages.map(s => s.id)))]
 
-export const STAGE_IDS: readonly StageId[] = STAGES.map(s => s.id)
+/** 專案類型：只影響少數標籤與 feature 是否有「送審」。 */
+export type ProjectKind = 'ios' | 'default'
+export const PROJECT_OVERRIDES: Record<
+  ProjectKind,
+  { labels?: Partial<Record<TaskId, Partial<Record<StageId, string>>>>; omit?: Partial<Record<TaskId, readonly StageId[]>> }
+> = {
+  ios: { labels: { feature: { ship: 'TF', accept: '真機' }, bugfix: { ship: 'TF' } } },
+  default: { labels: { feature: { ship: '部署', accept: '驗收' }, bugfix: { ship: '部署' } }, omit: { feature: ['submit'] } },
+}
+
+/** work 任務推斷：本 session 主迴圈至少這麼多次讀取類工具呼叫、且沒有其他訊號。 */
+export const WORK_MIN_READS = 8
+
+/** 舊版（0.1）stage id 的對應：tf → ship、device → accept。 */
+export const LEGACY_STAGE_IDS: Readonly<Record<string, StageId>> = { tf: 'ship', device: 'accept' }
 
 /** 進度條的點與連接線：已過 ●━、目前 ◉、未到 ○┄。 */
 export const GLYPHS = { done: '●', current: '◉', todo: '○', doneLine: '━', todoLine: '┄' } as const
@@ -25,7 +70,7 @@ export const BADGES = ['design', 'upgrade', 'mutation', 'debug', 'merge'] as con
 export type BadgeId = (typeof BADGES)[number]
 
 /** 等待中的階段：到了這些階段狀態顯示 ⏸（等你）。 */
-export const WAITING_STAGES: readonly StageId[] = ['device']
+export const WAITING_STAGES: readonly StageId[] = ['accept']
 
 /** 門檻（分鐘）。卡住門檻可用環境變數覆寫，見 hooks/index.ts。 */
 export const THRESHOLDS = {
@@ -42,7 +87,7 @@ export const THRESHOLDS = {
 /** 重新計算畫面的週期（毫秒）；內容沒變不會 invalidate。 */
 export const TICK_MS = 20_000
 
-/** 寬度低於此值（或點距不到 1 格）改用單行窄版 ●●●●◉○○○○ 驗證 · 12m。 */
+/** 寬度低於此值（或點距不到 1 格）改用單行窄版 修bug ●◉○○○○○ 診斷 · 12m。 */
 export const NARROW_COLUMNS = 40
 
 /** 點線進度條右側保留的邊距（欄）。 */

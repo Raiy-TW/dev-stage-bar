@@ -73,11 +73,11 @@ describe('等待與執行中', () => {
     const a = act({ calls: [{ id: 'q', tool: 'AskUserQuestion', label: 'AskUserQuestion', startedAt: start }], lastEventAt: start, lastEventByOwner: { main: start }, isWorking: true })
     expect(evaluateStatus(emptyState(), a, THRESHOLDS).kind).toBe('waiting')
   })
-  test('device 階段 → waiting；submit 已送出 → waiting；submit 未送出 → 不是 waiting', async () => {
-    expect(evaluateStatus(applySetStage(emptyState(), { stage: 'device' }, T0, S), act(), THRESHOLDS).kind).toBe('waiting')
-    const sub = applyClassification(applySetStage(emptyState(), { stage: 'submit' }, T0, S), { guess: 'submit', submitted: true }, T0, S)
+  test('accept（真機驗收）階段 → waiting；submit 已送出 → waiting；submit 未送出 → 不是 waiting', async () => {
+    expect(evaluateStatus(applySetStage(emptyState(), { task: 'feature', stage: 'accept' }, T0, S), act(), THRESHOLDS).kind).toBe('waiting')
+    const sub = applyClassification(applySetStage(emptyState(), { task: 'feature', stage: 'submit' }, T0, S), { guess: 'submit', submitted: true }, T0, S, 'ios')
     expect(evaluateStatus(sub, act(), THRESHOLDS).kind).toBe('waiting')
-    expect(evaluateStatus(applySetStage(emptyState(), { stage: 'submit' }, T0, S), act(), THRESHOLDS).kind).toBe('idle')
+    expect(evaluateStatus(applySetStage(emptyState(), { task: 'feature', stage: 'submit' }, T0, S), act(), THRESHOLDS).kind).toBe('idle')
   })
   test('5 分鐘內有工具活動 → running；超過 → idle', async () => {
     expect(evaluateStatus(emptyState(), act({ lastEventAt: T0 - 4 * MIN }), THRESHOLDS).kind).toBe('running')
@@ -86,8 +86,8 @@ describe('等待與執行中', () => {
 })
 
 describe('點線進度條', () => {
-  const st = applySetStage(emptyState(), { stage: 'verify', detail: 'T3/5', milestone: 'M48' }, T0 - 12 * MIN, S)
-  const opts = (columns: number, maxRows = 5) => ({ sessionId: S, columns, maxRows, th: THRESHOLDS })
+  const st = applySetStage(emptyState(), { task: 'feature', stage: 'verify', detail: 'T3/5', milestone: 'M48' }, T0 - 12 * MIN, S)
+  const opts = (columns: number, maxRows = 5) => ({ sessionId: S, columns, maxRows, th: THRESHOLDS, project: 'ios' as const })
   const dotCols = (t: string): number[] => {
     // 回傳每個點（●◉○）所在的欄位（點與線都是 1 欄字元）。
     const cols: number[] = []
@@ -121,7 +121,7 @@ describe('點線進度條', () => {
   test('已過 ●━ 柔和綠、目前 ◉ 粗體主色、未到 ○┄ dim；不再列出 9 個階段名與載／存', async () => {
     const [bar] = renderLines(st, act(), opts(160))
     const t = lineText(bar!)
-    expect(t.startsWith('●━')).toBe(true)
+    expect(t.startsWith('新功能 ●━')).toBe(true)
     expect(t).toContain('◉┄')
     for (const w of ['需求', '規格', '拆解', '實作', '驗證', '審查', 'TF', '真機', '送審', '載', '存']) expect(t).not.toContain(w)
     const done = bar!.filter(s => /[●━]/.test(s.text))
@@ -144,10 +144,10 @@ describe('點線進度條', () => {
   })
 
   test('第 1 點（intent）與第 9 點（submit）的文字夾在邊界內', async () => {
-    const first = applySetStage(emptyState(), { stage: 'intent', detail: 'long detail here' }, T0 - 3 * MIN, S)
+    const first = applySetStage(emptyState(), { task: 'feature', stage: 'intent', detail: 'long detail here' }, T0 - 3 * MIN, S)
     const l1 = lineText(renderLines(first, act(), opts(100))[1]!)
     expect(l1.startsWith('需求')).toBe(true)
-    const last = applySetStage(emptyState(), { stage: 'submit', detail: 'long detail here', milestone: 'M48' }, T0 - 3 * MIN, S)
+    const last = applySetStage(emptyState(), { task: 'feature', stage: 'submit', detail: 'long detail here', milestone: 'M48' }, T0 - 3 * MIN, S)
     const lines = renderLines(last, act(), opts(100))
     const l9 = lineText(lines[1]!)
     expect(displayWidth(l9)).toBeLessThanOrEqual(100)
@@ -157,17 +157,44 @@ describe('點線進度條', () => {
     expect(displayWidth(l9)).toBeGreaterThanOrEqual(xs[8]!)
   })
 
-  test('尚未設定階段：全部 ○ 與 ┄，不寫字、不畫第 2 行', async () => {
+  test('尚未判定任務：只畫一行 dim 的「判斷任務中…」，不畫點線', async () => {
     const lines = renderLines(emptyState(), act(), opts(160))
+    expect(lines).toHaveLength(1)
+    expect(lineText(lines[0]!)).toBe('判斷任務中…')
+    expect(lines[0]!.every(s => s.dim)).toBe(true)
+  })
+
+  test('有任務但尚未進入步驟：任務名＋全部 ○ 與 ┄，不畫第 2 行', async () => {
+    const s0 = applyClassification(emptyState(), { codeWrite: true, other: true }, T0, S, 'default')
+    const lines = renderLines(s0, act(), { ...opts(160), project: 'default' })
     expect(lines).toHaveLength(1)
     const t = lineText(lines[0]!)
     expect(t).not.toMatch(/[●◉━]/)
-    expect(dotCols(t)).toHaveLength(9)
-    expect(t).not.toContain('尚未設定階段')
+    expect(dotCols(t)).toHaveLength(8)
+  })
+
+  test('第 1 行最左是任務名；點數依任務與專案（bugfix 7、default feature 8）', async () => {
+    const bug = applySetStage(emptyState(), { task: 'bugfix', stage: 'diagnose' }, T0, S)
+    const t = lineText(renderLines(bug, act(), opts(120))[0]!)
+    expect(t.startsWith('修bug ')).toBe(true)
+    expect(dotCols(t)).toHaveLength(7)
+    const web = applySetStage(emptyState(), { task: 'feature', stage: 'ship' }, T0, S)
+    const lines = renderLines(web, act(), { ...opts(120), project: 'default' })
+    expect(dotCols(lineText(lines[0]!))).toHaveLength(8)
+    expect(lineText(lines[1]!).trim()).toBe('部署 · 0m')
+  })
+
+  test('宣告的任務名用主色；推斷的任務名 dim 並附「推測」', async () => {
+    const declared = renderLines(applySetStage(emptyState(), { task: 'bugfix', stage: 'fix' }, T0, S), act(), opts(120))[0]!
+    expect(declared[0]).toEqual(expect.objectContaining({ text: '修bug', color: COLORS.current }))
+    const inferred = applyClassification(emptyState(), { task: 'bugfix', authority: 'diagnose' }, T0, S, 'ios')
+    const line = renderLines(inferred, act(), opts(120))[0]!
+    expect(lineText(line).startsWith('修bug 推測 ●')).toBe(true)
+    expect(line[0]!.dim).toBe(true)
   })
 
   test('上個 session 的狀態在第 2 行附「上次更新 X 小時前」', async () => {
-    const old = applySetStage(emptyState(), { stage: 'impl' }, T0 - 3 * 60 * MIN, 'old')
+    const old = applySetStage(emptyState(), { task: 'feature', stage: 'impl' }, T0 - 3 * 60 * MIN, 'old')
     expect(lineText(renderLines(old, act(), opts(160))[1]!)).toContain('實作 · 3h0m · 上次更新 3 小時前')
     expect(lineText(renderLines(old, act(), { ...opts(160), sessionId: 'old' })[1]!)).not.toContain('上次更新')
   })
@@ -185,10 +212,10 @@ describe('點線進度條', () => {
     expect(lineText(one[0]!)).toContain('驗證')
   })
 
-  test('窄版（< NARROW_COLUMNS 或點距不到 1 格）：單行 ●●●●◉○○○○ 驗證 · T3/5 · 12m', async () => {
-    const lines = renderLines(st, act(), opts(30))
+  test('窄版（< NARROW_COLUMNS 或點距不到 1 格）：單行 新功能 ●●●●◉○○○○ 驗證 · T3/5 · 12m', async () => {
+    const lines = renderLines(st, act(), opts(38))
     expect(lines).toHaveLength(1)
-    expect(lineText(lines[0]!)).toBe('●●●●◉○○○○ 驗證 · T3/5 · 12m')
+    expect(lineText(lines[0]!)).toBe('新功能 ●●●●◉○○○○ 驗證 · T3/5 · 12m')
   })
 
   test('任何寬度都不超過 columns', async () => {
@@ -201,8 +228,8 @@ describe('點線進度條', () => {
 })
 
 describe('活動列', () => {
-  const st = applyClassification(applySetStage(emptyState(), { stage: 'impl' }, T0, S), { badge: 'debug' }, T0, S)
-  const st2 = applyClassification(st, { badge: 'merge' }, T0, S)
+  const st = applyClassification(applySetStage(emptyState(), { task: 'feature', stage: 'impl' }, T0, S), { badge: 'debug' }, T0, S, 'ios')
+  const st2 = applyClassification(st, { badge: 'merge' }, T0, S, 'ios')
   test('執行中：subagent 簡稱、其最久指令與耗時、badge', async () => {
     const a = act({
       lastEventAt: T0 - MIN,
@@ -210,7 +237,7 @@ describe('活動列', () => {
       agents: [{ id: 'a1', short: 'T3 impl', startedAt: T0 - 20 * MIN }, { id: 'a2', short: 'T2 review', startedAt: T0 - 3 * MIN }],
       lastEventByOwner: { a1: T0 - MIN, a2: T0 - MIN },
     })
-    const lines = renderLines(st2, a, { sessionId: S, columns: 160, maxRows: 5, th: THRESHOLDS })
+    const lines = renderLines(st2, a, { sessionId: S, columns: 160, maxRows: 5, th: THRESHOLDS, project: 'ios' as const })
     expect(lines).toHaveLength(3)
     const t = lineText(lines[2]!)
     expect(t).toContain('🔄 T3 impl: xcodebuild test 12m · T2 review 3m')
@@ -218,20 +245,20 @@ describe('活動列', () => {
   })
   test('短於 showToolAfterSec 的呼叫不顯示', async () => {
     const a = act({ lastEventAt: T0, calls: [{ id: 'c1', tool: 'Bash', label: 'echo hi', startedAt: T0 - 5_000 }] })
-    const lines = renderLines(emptyState(), a, { sessionId: S, columns: 160, maxRows: 5, th: THRESHOLDS })
+    const lines = renderLines(emptyState(), a, { sessionId: S, columns: 160, maxRows: 5, th: THRESHOLDS, project: 'ios' as const })
     expect(lineText(lines[1]!)).not.toContain('echo hi')
   })
   test('卡住時整行用 stuck 色', async () => {
     const start = T0 - 30 * MIN
     const a = act({ calls: [{ id: 'c1', tool: 'Bash', label: 'sleep 9999', startedAt: start }], lastEventAt: start, lastEventByOwner: { main: start } })
-    const lines = renderLines(emptyState(), a, { sessionId: S, columns: 160, maxRows: 5, th: THRESHOLDS })
+    const lines = renderLines(emptyState(), a, { sessionId: S, columns: 160, maxRows: 5, th: THRESHOLDS, project: 'ios' as const })
     const l2 = lines[1]!
     expect(lineText(l2)).toContain('⚠ 主迴圈 30 分鐘沒有動靜（sleep 9999 仍在跑）')
     expect(l2.every(s => s.color === COLORS.stuck)).toBe(true)
   })
   test('閒置且無 badge → 只有一行；maxRows=1 → 只有一行', async () => {
-    expect(renderLines(emptyState(), act(), { sessionId: S, columns: 160, maxRows: 5, th: THRESHOLDS })).toHaveLength(1)
+    expect(renderLines(emptyState(), act(), { sessionId: S, columns: 160, maxRows: 5, th: THRESHOLDS, project: 'ios' as const })).toHaveLength(1)
     const a = act({ lastEventAt: T0 })
-    expect(renderLines(emptyState(), a, { sessionId: S, columns: 160, maxRows: 1, th: THRESHOLDS })).toHaveLength(1)
+    expect(renderLines(emptyState(), a, { sessionId: S, columns: 160, maxRows: 1, th: THRESHOLDS, project: 'ios' as const })).toHaveLength(1)
   })
 })

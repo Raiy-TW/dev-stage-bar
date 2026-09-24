@@ -1,5 +1,6 @@
 // 狀態判定與兩行排版（純函式，無 $）：輸出 segment 陣列，由 hooks/index.ts 轉成 Box/Text。
-import { COLORS, GLYPHS, NARROW_COLUMNS, SAFETY_MARGIN, STAGES, WAITING_STAGES, type THRESHOLDS } from './stages.ts'
+import { COLORS, GLYPHS, NARROW_COLUMNS, SAFETY_MARGIN, TASKS, WAITING_STAGES, type ProjectKind, type THRESHOLDS } from './stages.ts'
+import { stagesFor, type StageDef } from './tasks.ts'
 import type { StageState } from './state.ts'
 import { displayWidth, truncateToWidth } from './width.ts'
 
@@ -36,6 +37,8 @@ export type StatusKind = 'stuck' | 'waiting' | 'running' | 'idle'
 export type Status = { kind: StatusKind; text: string }
 
 const MIN = 60_000
+const PENDING_TEXT = '判斷任務中…'
+const INFERRED_MARK = '推測'
 const MAIN = 'main'
 const ASK_TOOL = 'AskUserQuestion'
 
@@ -87,7 +90,7 @@ export function evaluateStatus(state: StageState, act: Activity, th: Thresholds)
   }
   if (asking) return { kind: 'waiting', text: '⏸ 等你：回答問題' }
   if (permission) return { kind: 'waiting', text: `⏸ 等你：授權 ${permission.label}` }
-  if (state.stage && WAITING_STAGES.includes(state.stage)) return { kind: 'waiting', text: '⏸ 等你：真機驗收' }
+  if (state.stage && WAITING_STAGES.includes(state.stage)) return { kind: 'waiting', text: '⏸ 等你：驗收' }
   if (state.stage === 'submit' && state.submitted) return { kind: 'waiting', text: '⏸ 排審中' }
   if (act.calls.length > 0 || act.agents.length > 0 || (act.lastEventAt !== null && now - act.lastEventAt <= th.activeMin * MIN)) {
     return { kind: 'running', text: '🔄' }
@@ -95,10 +98,15 @@ export function evaluateStatus(state: StageState, act: Activity, th: Thresholds)
   return { kind: 'idle', text: '' }
 }
 
-// ── 第 1、2 行：點線進度條與目前點下方的文字 ─────────────────
+// ── 第 1、2 行：任務名＋點線進度條、目前點下方的文字 ─────────────
 
-function stageIndex(state: StageState): number {
-  return state.stage ? STAGES.findIndex(s => s.id === state.stage) : -1
+/** 目前任務在此專案類型下的步驟表（沒有任務時為空）。 */
+function stagesOf(state: StageState, project: ProjectKind): StageDef[] {
+  return state.task ? stagesFor(state.task, project) : []
+}
+
+function stageIndex(state: StageState, stages: readonly StageDef[]): number {
+  return state.stage ? stages.findIndex(s => s.id === state.stage) : -1
 }
 
 function staleText(state: StageState, sessionId: string, now: number): string | undefined {
@@ -127,12 +135,20 @@ function fitLine(line: Line, columns: number): Line {
   return out
 }
 
-/** 「驗證 · T3/5 · 12m」與（上個 session 的狀態時）「· 上次更新 3 小時前」；沒有階段時為空。 */
-function stageLabel(state: StageState, now: number, sessionId: string): Line {
-  const idx = stageIndex(state)
+/** 最左的任務名：宣告的用主色；推斷的 dim 並附「推測」。後面帶一格空白。 */
+function taskPrefix(state: StageState): Line {
+  if (!state.task) return []
+  const label = TASKS[state.task].label
+  if (state.taskSource === 'inferred') return [{ text: label, dim: true }, { text: ` ${INFERRED_MARK} `, dim: true }]
+  return [{ text: label, color: COLORS.current }, { text: ' ' }]
+}
+
+/** 「驗證 · T3/5 · 12m」與（上個 session 的狀態時）「· 上次更新 3 小時前」；沒有步驟時為空。 */
+function stageLabel(state: StageState, stages: readonly StageDef[], now: number, sessionId: string): Line {
+  const idx = stageIndex(state, stages)
   if (idx < 0) return []
   const parts = [state.detail, fmtDuration(now - state.stageSince)].filter((p): p is string => !!p)
-  const line: Line = [{ text: STAGES[idx]!.label, color: COLORS.current, bold: true }, { text: ` · ${parts.join(' · ')}` }]
+  const line: Line = [{ text: stages[idx]!.label, color: COLORS.current, bold: true }, { text: ` · ${parts.join(' · ')}` }]
   const stale = staleText(state, sessionId, now)
   if (stale) line.push({ text: ` · ${stale}`, dim: true })
   return line
@@ -140,26 +156,30 @@ function stageLabel(state: StageState, now: number, sessionId: string): Line {
 
 const MILESTONE_GAP = '   '
 
-/** 9 個點之間的連接線長度；右側保留 milestone。 */
-function dotGap(state: StageState, columns: number): number {
+/** 點之間的連接線長度；左側扣掉任務名，右側保留 milestone。 */
+function dotGap(state: StageState, count: number, prefixWidth: number, columns: number): number {
   const reserve = state.milestone ? displayWidth(MILESTONE_GAP + state.milestone) : 0
-  return Math.floor((columns - SAFETY_MARGIN - reserve - STAGES.length) / (STAGES.length - 1))
+  return Math.floor((columns - SAFETY_MARGIN - prefixWidth - reserve - count) / Math.max(1, count - 1))
 }
 
-/** 第 1 行：●━━●━━◉┄┄○┄┄○   M48，點平均分布；回傳每個點的欄位供第 2 行對齊。 */
-function dotsLine(state: StageState, gap: number): { line: Line; xs: number[] } {
-  const idx = stageIndex(state)
-  const line: Line = []
+function dotSeg(i: number, idx: number): Seg {
+  if (i < idx) return { text: GLYPHS.done, color: COLORS.done }
+  if (i === idx) return { text: GLYPHS.current, color: COLORS.current, bold: true }
+  return { text: GLYPHS.todo, dim: true }
+}
+
+/** 第 1 行：修bug ●━━●━━◉┄┄○┄┄○   M48，點平均分布；回傳每個點的欄位供第 2 行對齊。 */
+function dotsLine(state: StageState, stages: readonly StageDef[], prefix: Line, gap: number): { line: Line; xs: number[] } {
+  const idx = stageIndex(state, stages)
+  const line: Line = [...prefix]
   const xs: number[] = []
-  STAGES.forEach((_, i) => {
+  stages.forEach((_, i) => {
     if (i > 0) {
       const passed = i <= idx
       line.push({ text: (passed ? GLYPHS.doneLine : GLYPHS.todoLine).repeat(gap), ...(passed ? { color: COLORS.done } : { dim: true }) })
     }
     xs.push(width(line))
-    if (i < idx) line.push({ text: GLYPHS.done, color: COLORS.done })
-    else if (i === idx) line.push({ text: GLYPHS.current, color: COLORS.current, bold: true })
-    else line.push({ text: GLYPHS.todo, dim: true })
+    line.push(dotSeg(i, idx))
   })
   if (state.milestone) line.push({ text: MILESTONE_GAP }, { text: state.milestone, color: COLORS.milestone, bold: true })
   return { line, xs }
@@ -173,28 +193,30 @@ function alignUnder(label: Line, x: number, columns: number): Line {
   return start > 0 ? [{ text: ' '.repeat(start) }, ...fitted] : fitted
 }
 
-/** 窄版單行：●●●●◉○○○○ 驗證 · 12m */
-function compactLine(state: StageState, now: number, sessionId: string, columns: number): Line {
-  const idx = stageIndex(state)
-  const line: Line = STAGES.map((_, i) =>
-    i < idx
-      ? { text: GLYPHS.done, color: COLORS.done }
-      : i === idx
-        ? { text: GLYPHS.current, color: COLORS.current, bold: true }
-        : { text: GLYPHS.todo, dim: true },
-  )
-  const label = stageLabel(state, now, sessionId)
+/** 尚未判定任務：一行 dim 的「判斷任務中…」。 */
+const pendingLine = (columns: number): Line => fitLine([{ text: PENDING_TEXT, dim: true }], columns)
+
+/** 窄版單行：修bug ●◉○○○○○ 診斷 · 12m */
+function compactLine(state: StageState, project: ProjectKind, now: number, sessionId: string, columns: number): Line {
+  if (!state.task) return pendingLine(columns)
+  const stages = stagesOf(state, project)
+  const idx = stageIndex(state, stages)
+  const line: Line = [...taskPrefix(state), ...stages.map((_, i) => dotSeg(i, idx))]
+  const label = stageLabel(state, stages, now, sessionId)
   if (label.length) line.push({ text: ' ' }, ...label)
   return fitLine(line, columns)
 }
 
 /** 第 1、2 行（第 2 行可能為空）；窄到點距不足時為單行。 */
-function progressLines(state: StageState, now: number, sessionId: string, columns: number): { bar: Line; label?: Line } {
-  const gap = dotGap(state, columns)
-  if (columns < NARROW_COLUMNS || gap < 1) return { bar: compactLine(state, now, sessionId, columns) }
-  const { line, xs } = dotsLine(state, gap)
-  const label = stageLabel(state, now, sessionId)
-  const idx = stageIndex(state)
+function progressLines(state: StageState, project: ProjectKind, now: number, sessionId: string, columns: number): { bar: Line; label?: Line } {
+  if (!state.task) return { bar: pendingLine(columns) }
+  const stages = stagesOf(state, project)
+  const prefix = taskPrefix(state)
+  const gap = dotGap(state, stages.length, width(prefix), columns)
+  if (columns < NARROW_COLUMNS || gap < 1) return { bar: compactLine(state, project, now, sessionId, columns) }
+  const { line, xs } = dotsLine(state, stages, prefix, gap)
+  const label = stageLabel(state, stages, now, sessionId)
+  const idx = stageIndex(state, stages)
   return { bar: fitLine(line, columns), ...(label.length ? { label: alignUnder(label, xs[idx]!, columns) } : {}) }
 }
 
@@ -243,12 +265,12 @@ function activityLine(state: StageState, act: Activity, st: Status, sessionId: s
   return fitLine(body, columns)
 }
 
-export type LayoutOptions = { sessionId: string; columns: number; maxRows: number; th: Thresholds }
+export type LayoutOptions = { sessionId: string; columns: number; maxRows: number; th: Thresholds; project: ProjectKind }
 
 export function renderLines(state: StageState, act: Activity, o: LayoutOptions): Line[] {
   // 只有一列可用：窄版單行（點＋階段文字）。
-  if (o.maxRows < 2) return [compactLine(state, act.now, o.sessionId, o.columns)]
-  const { bar, label } = progressLines(state, act.now, o.sessionId, o.columns)
+  if (o.maxRows < 2) return [compactLine(state, o.project, act.now, o.sessionId, o.columns)]
+  const { bar, label } = progressLines(state, o.project, act.now, o.sessionId, o.columns)
   const activity = activityLine(state, act, evaluateStatus(state, act, o.th), o.sessionId, o.columns, o.th)
   const lines: Line[] = [bar]
   if (o.maxRows >= 3 || !label || !activity) {
@@ -257,7 +279,7 @@ export function renderLines(state: StageState, act: Activity, o: LayoutOptions):
     return lines.slice(0, Math.max(1, o.maxRows))
   }
   // 只有兩列：把階段文字併進活動列開頭。
-  const merged = [...stageLabel(state, act.now, o.sessionId), { text: ' · ' }, ...activity]
+  const merged = [...stageLabel(state, stagesOf(state, o.project), act.now, o.sessionId), { text: ' · ' }, ...activity]
   lines.push(fitLine(merged, o.columns))
   return lines
 }

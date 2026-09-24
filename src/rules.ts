@@ -1,5 +1,5 @@
 // 工具呼叫 → 階段訊號的判斷規則（純函式，無 $）。
-import type { BadgeId, StageId } from './stages.ts'
+import type { BadgeId, StageId, TaskId } from './stages.ts'
 import { truncateToWidth } from './width.ts'
 
 /** tool.call 的輸入攤平後我們會讀的欄位。 */
@@ -25,21 +25,43 @@ export type Classification = {
   badge?: BadgeId
   /** 已送出審查（submit 階段據此顯示 ⏸ 排審中）。 */
   submitted?: boolean
+  /** 任務訊號：只在本 session 尚未宣告 task 時用來推斷任務。 */
+  task?: TaskId
+  /** 主迴圈的讀取類呼叫（Read/Grep/…、唯讀 Bash、寫 .md）：累積到門檻推斷 work。 */
+  readOnly?: boolean
+  /** 主迴圈的其他動作（非唯讀 Bash、寫程式檔、Agent…）：出現就不推斷 work。 */
+  other?: boolean
+  /** 寫了程式檔（非 .md）：任務仍未判定時預設 feature。 */
+  codeWrite?: boolean
 }
 
-const AUTHORITY: Readonly<Record<string, StageId>> = {
-  'ios-review': 'review',
-  'ios-sim-verify': 'verify',
-  'ios-to-tf': 'tf',
-  'ios-submit': 'submit',
+/** 權威轉換：skill／workflow 名 → 步驟（依目前任務查表，查不到就不改），可附帶任務。 */
+const AUTHORITY: Readonly<Record<string, { stage: StageId; task?: TaskId }>> = {
+  'ios-review': { stage: 'review' },
+  'ios-sim-verify': { stage: 'verify' },
+  'ios-to-tf': { stage: 'ship' },
+  'ios-submit': { stage: 'submit' },
+  'ios-diagnose': { stage: 'diagnose', task: 'bugfix' },
 }
+
+/** 只隱含任務、不指定步驟的 skill。 */
+const TASK_SKILLS: Readonly<Record<string, TaskId>> = {
+  'superpowers:systematic-debugging': 'bugfix',
+  'superpowers:brainstorming': 'feature',
+}
+
+const READ_TOOLS: ReadonlySet<string> = new Set(['Read', 'Grep', 'Glob', 'WebFetch', 'WebSearch', 'ToolSearch', 'LS', 'NotebookRead'])
+/** 不算讀取也不算其他動作的工具（互動、規劃、本身無訊號的 skill）。 */
+const NEUTRAL_TOOLS: ReadonlySet<string> = new Set(['AskUserQuestion', 'TodoWrite', 'Skill', 'Workflow', 'SendMessage', 'TaskStop', 'Monitor'])
+const READ_ONLY_BASH = /^\s*(ls|cat|head|tail|grep|rg|find|fd|wc|pwd|echo|which|file|stat|tree|du|jq|less|sed -n|git (status|log|diff|show|branch|blame|remote))\b/
 
 const RE = {
   agentImpl: /^(M\d+ )?T\d+|Implement T\d+|Bank [A-Z]:/,
   agentReview: /Review (M\d+ )?T\d+|fresh review|Final whole-branch review|Independent review/,
   codexReviewWord: /審查|audit|review/i,
   verify: /xcodebuild\b.*\b(test|test-without-building|build-for-testing)\b|xcrun simctl|swiftlint|check-lint|check-warnings/,
-  tf: /asc builds upload|asc publish testflight|asc xcode archive|agvtool/,
+  ship: /asc builds upload|asc publish testflight|asc xcode archive|agvtool/,
+  ghIssue: /\bgh issue\b/,
   submit: /asc review|asc submit/,
   mutation: /scripts\/mutate\.sh/,
   merge: /\bgit (merge|push)\b/,
@@ -57,14 +79,30 @@ function invokedName(e: ToolEvent): { full: string; base: string } | undefined {
   return { full: raw, base: raw.includes(':') ? raw.slice(raw.lastIndexOf(':') + 1) : raw }
 }
 
+/** 唯讀 Bash：每一段（| && ;）都以唯讀指令開頭，且沒有輸出重導。 */
+export function isReadOnlyBash(command: string): boolean {
+  if (/(^|[^0-9&])>(?!&)/.test(command)) return false
+  return command
+    .split(/\|\||&&|;|\|/)
+    .map(p => p.trim())
+    .filter(Boolean)
+    .every(p => READ_ONLY_BASH.test(p))
+}
+
 export function classify(e: ToolEvent): Classification {
   const c: Classification = {}
+  const main = !e.agentId
   const inv = invokedName(e)
   if (inv) {
     if (e.tool === 'Skill' && inv.full === 'load') c.handoff = 'load'
     else if (e.tool === 'Skill' && inv.full === 'save') c.handoff = 'save'
-    const stage = AUTHORITY[inv.base]
-    if (stage) c.authority = stage
+    const auth = AUTHORITY[inv.base]
+    if (auth) {
+      c.authority = auth.stage
+      if (auth.task) c.task = auth.task
+    }
+    const task = TASK_SKILLS[inv.full]
+    if (task) c.task = task
     if (inv.base === 'ios-diagnose' || inv.full === 'codex:rescue') c.badge = 'debug'
     return c
   }
@@ -72,8 +110,20 @@ export function classify(e: ToolEvent): Classification {
   switch (e.tool) {
     case 'Write':
     case 'Edit':
-      if (e.file_path?.includes('/specs/')) c.guess = 'spec'
+    case 'NotebookEdit': {
+      const path = e.file_path ?? ''
+      if (path.includes('/specs/')) {
+        c.guess = 'spec'
+        c.task = 'feature'
+      }
+      const isDoc = /\.md$/i.test(path)
+      if (!isDoc) c.codeWrite = true
+      if (main) {
+        if (isDoc) c.readOnly = true
+        else c.other = true
+      }
       break
+    }
     case 'Agent': {
       const d = e.description ?? ''
       if (RE.agentReview.test(d)) c.guess = 'review'
@@ -82,17 +132,21 @@ export function classify(e: ToolEvent): Classification {
         else c.badge = 'debug'
       } else if (RE.agentImpl.test(d)) c.guess = 'impl'
       if (RE.upgrade.test(d)) c.badge = 'upgrade'
+      if (main) c.other = true
       break
     }
     case 'Bash': {
       const cmd = e.command ?? ''
-      // subagent 內的指令屬於該 subagent 的細節，不改階段。
-      if (!e.agentId) {
+      // subagent 內的指令屬於該 subagent 的細節，不改階段、不計入任務推斷。
+      if (main) {
         if (RE.submit.test(cmd)) {
           c.guess = 'submit'
           if (/asc submit/.test(cmd)) c.submitted = true
-        } else if (RE.tf.test(cmd)) c.guess = 'tf'
+        } else if (RE.ship.test(cmd)) c.guess = 'ship'
         else if (RE.verify.test(cmd)) c.guess = 'verify'
+        if (RE.ghIssue.test(cmd)) c.task = 'bugfix'
+        if (isReadOnlyBash(cmd)) c.readOnly = true
+        else c.other = true
       }
       if (RE.mutation.test(cmd)) c.badge = 'mutation'
       else if (RE.merge.test(cmd)) c.badge = 'merge'
@@ -101,7 +155,11 @@ export function classify(e: ToolEvent): Classification {
     }
     case 'DesignSync':
       c.badge = 'design'
+      if (main) c.other = true
       break
+    default:
+      if (main && READ_TOOLS.has(e.tool)) c.readOnly = true
+      else if (main && !NEUTRAL_TOOLS.has(e.tool) && !e.tool.startsWith('mcp__')) c.other = true
   }
   return c
 }
