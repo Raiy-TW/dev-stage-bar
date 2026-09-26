@@ -76,8 +76,27 @@ mod 在每個專案都註冊工具 `mcp__dev-stage-bar__SetStage({ task?, stage,
 
 - bugfix：skill `ios-diagnose`、`superpowers:systematic-debugging`，或主迴圈 Bash 含 `gh issue`。
 - feature：skill `superpowers:brainstorming`，或寫入路徑含 `/specs/`。
-- 寫了程式檔（非 `.md`）而任務仍未判定 → feature，並推測步驟為實作（`impl`）。
-- work 不推斷（讀再多檔也不算），靠模型用 SetStage 宣告。
+- 寫了程式檔（非 `.md`）而沒有現在的任務 → feature，並推測步驟為實作（`impl`）。已有現在的任務（例如 prompt 推測的 bugfix）時不改。
+- 使用者的 prompt（見下節）可推測 bugfix／feature／work 與第一步。
+- 讀再多檔也不會推成 work。
+
+**使用者的 prompt**（純本地關鍵字比對，不呼叫模型、不花 token）：
+
+只看你自己送出的 prompt（Enter 或 Remote Control），通知、其他 session、排程送來的不算。只有在**沒有現在的任務**時才會設定任務（以「推測」顯示、不鎖步驟）；已經在做的任務不會被下一句話的關鍵字換掉，本 session 用 SetStage 宣告的任務即使過期也不會。
+
+| 命中 | 結果 |
+|---|---|
+| 修、bug、壞、錯誤、閃退、crash、卡住、報錯、error、fix、失敗、不會動、debug | 修bug · 重現 |
+| 新增、加上、加一個、做一個、實作、優化、改成、implement、add、build | 新功能 · 需求 |
+| 研究、調查、規劃、整理、文件、報告、比較、research、plan、docs | 非程式 · 釐清 |
+| 沒命中上面任何一列，且以 ?／？ 結尾或含 嗎、呢、為什麼、什麼、怎麼、如何、是不是、會不會、有沒有、能不能、差別、解釋、why、what、how | 問答：送出當下就顯示「問答中」／「討論中」 |
+| 以 `/` 開頭、整句是 繼續／好／ok／push／commit／存檔／save 等接續語，或去掉標點後不超過 2 個字 | 不判斷 |
+
+- 同時命中多列時取表中較上面的一列：bug 與 feature 都命中 → 修bug；feature 與 work → 新功能。
+- 有動作關鍵字的問句算動作（「為什麼會閃退？」→ 修bug）。
+- 中文關鍵字以子字串比對，英文以單字邊界、不分大小寫比對（address 不是 add、debugger 不是 bug）。比對前先把「修改」換成「改」、「修飾」換成「飾」，避免被當成修 bug。
+- 例：「幫我優化 dev-stage-bar 他會莫名卡在某個階段」→ 新功能（「優化」命中，「卡在」不是關鍵字）；「用 haiku 讀 prompt 判斷任務 這個會很消耗token嗎？」→ 問答。
+- 要改關鍵字、優先序、接續語，只改 `src/stages.ts` 的 `PROMPT_INTENT`（`rules` 的順序就是優先序）。
 
 **步驟**（依目前任務查表，查不到就不改）：
 
@@ -101,7 +120,7 @@ mod 在每個專案都註冊工具 `mcp__dev-stage-bar__SetStage({ task?, stage,
 
 ## 自訂
 
-**要改任務與步驟、專案標籤、badge、卡住與新鮮度門檻、配色、點線字元，只改 `src/stages.ts`**，邏輯不用動。
+**要改任務與步驟、專案標籤、prompt 關鍵字、badge、卡住與新鮮度門檻、配色、點線字元，只改 `src/stages.ts`**，邏輯不用動。
 
 卡住門檻可用環境變數暫時覆寫（分鐘）：
 
@@ -124,6 +143,7 @@ CLAUDE_CODE_ENABLE_FUNCTION_HOOKS=1 claude plugin validate .  # 檢查 hook 與 
 - 按下授權後、指令真正開始前的幾秒仍顯示「⏸ 等你」；非 Bash 工具授權後會一路顯示到結束。
 - 右側的 `[-]` 是 Claude Code 自己加的收合鈕。
 - `mcp__*` 工具預設算動作，名稱最後一段以 get／list／read／search／query／find／describe／view／fetch／screenshot／ui_describe／ui_view 開頭的算讀取（`src/rules.ts` 的 `MCP_READ_ONLY`）。名稱猜錯時會誤判問答。
+- prompt 意圖只是關鍵字：「修」「add」這類字出現在別的語意裡會誤判（只影響沒有現在任務時的「推測」，模型一呼叫 SetStage 就以宣告為準）。
 - 問答偵測以 turn 為單位：turn 還沒結束前不知道它是不是對話。背景 subagent 完成後引擎自己開的接續 turn（沒有使用者文字）不改變上一個 turn 的判定。
 - 提醒段附加在 system prompt 的 `env_info_simple` 段；若之後版本改名或省略該段，提醒就不會出現（SetStage 的工具說明仍在）。
 - 只討論、不動手超過 120 分鐘，任務會變成「上次」；再有任何步驟訊號、SetStage 或本 session 的動作就回來。
