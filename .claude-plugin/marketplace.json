@@ -10,7 +10,7 @@
       "name": "dev-stage-bar",
       "source": "./",
       "description": "Task-aware step progress line (feature / bugfix / non-code work) with live activity and stuck detection, drawn above the Claude Code prompt in any project.",
-      "version": "0.2.0",
+      "version": "0.3.0",
       "license": "MIT"
     }
   ]

@@ -10,9 +10,12 @@ A Claude Code mod (function hooks plugin) that draws the current task's step pro
 🔄 T3 impl: xcodebuild test 8m · T2 review 3m   [debug]
 ```
 
-- 第 1 行：最左是任務名，接著每個步驟一個點，點距隨終端寬度伸縮；右側是 milestone。任務還沒判定時只畫一行 dim 的「判斷任務中…」。
+- 第 1 行：最左是任務名，接著每個步驟一個點，點距隨終端寬度伸縮；右側是 milestone。沒有「現在」的任務時不畫點線，只畫一行 dim：
+  - `問答中`：本 turn 還沒有任何動作（只有讀取類工具或沒用工具）。
+  - `判斷任務中…`：本 turn 已經改檔、跑非唯讀指令或派 subagent，但任務還沒判定。
+  - 有舊任務時後面接 `· 上次：新功能 · TF · 17 小時前`（沒有步驟時省略步驟段）。
 - 第 2 行：只在目前那個點正下方寫「步驟 · 進度 · 本步驟耗時」。
-- 第 3 行：進行中的 subagent／最久的指令，以及狀態：🔄 執行中、⏸ 等你（提問、授權、驗收、排審）、⚠ 可能卡住。
+- 第 3 行：進行中的 subagent／最久的指令，以及狀態：🔄 執行中、⏸ 等你（提問、授權、驗收、排審）、⚠ 可能卡住。有現在的任務、上一個 turn 是問答、且沒有工具在跑時寫 dim 的「討論中」（badge 照舊接在後面）。
 - 窄於 40 欄時退回單行：`修bug ●●◉○○○○ 紅測試 · 12m`。
 - 純觀察：所有 hook 都原樣放行工具呼叫，不擋、不改；出錯只影響顯示。
 
@@ -60,9 +63,10 @@ CLAUDE_CODE_ENABLE_FUNCTION_HOOKS=1 claude --plugin-dir /path/to/dev-stage-bar
 
 ## 模型怎麼宣告：SetStage
 
-mod 在每個專案都註冊工具 `mcp__dev-stage-bar__SetStage({ task?, stage, detail?, milestone? })`，工具說明本身就寫了使用規則，不需要改你的 `CLAUDE.md`：
+mod 在每個專案都註冊工具 `mcp__dev-stage-bar__SetStage({ task?, stage, detail?, milestone? })`，工具說明本身就寫了使用規則，並在 system prompt 的 `env_info_simple` 段尾加兩句提醒（只在 SetStage 註冊成功時加、用實際註冊到的工具名），不需要改你的 `CLAUDE.md`：
 
-- 接到新任務先呼叫一次並帶 `task`；之後每進入一個步驟再呼叫；換任務就帶新的 `task`（整條重來、計時與 badge 重設）。
+- 開始實際工作（寫程式、修 bug、做研究／規劃／文件產出）時先呼叫一次並帶 `task`；之後每進入一個步驟再呼叫；換任務就帶新的 `task`（整條重來、計時與 badge 重設）。
+- 純問答、釐清問題時不呼叫。
 - 不帶 `task` 時沿用目前任務；目前沒有任務時，若 `stage` 只屬於一種任務就用它，否則回錯誤請它帶 `task`。
 - `stage` 不屬於該任務（例如 default 專案的 feature 沒有 `submit`）→ 回錯誤並列出合法值，狀態不變。
 
@@ -72,19 +76,32 @@ mod 在每個專案都註冊工具 `mcp__dev-stage-bar__SetStage({ task?, stage,
 
 - bugfix：skill `ios-diagnose`、`superpowers:systematic-debugging`，或主迴圈 Bash 含 `gh issue`。
 - feature：skill `superpowers:brainstorming`，或寫入路徑含 `/specs/`。
-- work：主迴圈至少 8 次讀取類呼叫（Read／Grep／Glob／WebFetch／WebSearch／ToolSearch、唯讀 Bash、只寫 `.md`），且沒有其他動作（非唯讀 Bash、寫程式檔、派 subagent…）。只在還沒有任何任務時判定。
-- 寫了程式檔（非 `.md`）而任務仍未判定 → feature。
+- 寫了程式檔（非 `.md`）而任務仍未判定 → feature，並推測步驟為實作（`impl`）。
+- work 不推斷（讀再多檔也不算），靠模型用 SetStage 宣告。
 
 **步驟**（依目前任務查表，查不到就不改）：
 
 1. **權威轉換**：`ios-review` → review、`ios-sim-verify` → verify、`ios-to-tf` → ship、`ios-submit` → submit、`ios-diagnose` → diagnose（未宣告任務時一併設為 bugfix）。例如 work 任務遇到 `ios-to-tf` 不會改步驟。
 2. **推測**（本 session 沒有 SetStage／權威轉換時才改步驟）：寫入 `/specs/` → spec；派 `T3 …` 類 subagent → impl；主迴圈 `xcodebuild test`／`simctl`／lint → verify；`asc builds upload`／`asc publish testflight` → ship；`asc review`／`asc submit` → submit。subagent 內的指令只算該 subagent 的細節。
 
-步驟可以往回跳。狀態以 cwd 為 key 存在 plugin store，新 session 會先顯示上次的任務與步驟並標「上次更新 X 前」。0.1 版存的 `tf`／`device` 會自動讀成 feature 的 `ship`／`accept`。
+步驟可以往回跳。
+
+## 新鮮度：「現在」還是「上次」
+
+狀態以 cwd 為 key 存在 plugin store，跨 session 保留。只有**真的設定任務／步驟**的事件會把它標成「現在」：SetStage、權威轉換、推測步驟（推測到目前這一步也算）、任務推斷切換。badge、`/load`／`/save`、其他工具呼叫都不算。
+
+- **fresh**＝最後一次設定是本 session，且距今不到 `THRESHOLDS.staleAfterMin`（預設 120 分鐘）。只有 fresh 的任務才畫點線。
+- 不 fresh 的任務只畫一行 dim 的「上次：…」，不會因為新 session 跑了別的指令就看起來像現在的階段。
+- 不 fresh 的任務在推斷裡強度為 0：本 session 任何任務訊號都能取代它（同一種任務也重新開始）。本 session 的步驟訊號若屬於舊任務的步驟表，就延續舊任務並變回 fresh（步驟計時重來，舊的 detail 不帶過來）。
+- 0.2 以前存的狀態沒有新鮮度欄位，一律視為「上次」；0.1 版存的 `tf`／`device` 會讀成 feature 的 `ship`／`accept`。
+
+## 問答偵測
+
+主迴圈一個 turn 裡只有讀取類工具（Read／Grep／Glob／WebFetch／WebSearch／ToolSearch、唯讀 Bash）、中性工具（AskUserQuestion、TodoWrite、沒有訊號的 Skill…）或完全沒用工具，就是「對話 turn」：不改任務／步驟、不刷新新鮮度，只改顯示（第 1 行「問答中」或第 3 行「討論中」）。改檔（含 `.md`）、非唯讀指令、派 subagent、SetStage，或任何改了任務／步驟的呼叫，都讓這個 turn 算「有動作」。
 
 ## 自訂
 
-**要改任務與步驟、專案標籤、work 推斷門檻、badge、卡住門檻、配色、點線字元，只改 `src/stages.ts`**，邏輯不用動。
+**要改任務與步驟、專案標籤、badge、卡住與新鮮度門檻、配色、點線字元，只改 `src/stages.ts`**，邏輯不用動。
 
 卡住門檻可用環境變數暫時覆寫（分鐘）：
 
@@ -106,6 +123,10 @@ CLAUDE_CODE_ENABLE_FUNCTION_HOOKS=1 claude plugin validate .  # 檢查 hook 與 
 
 - 按下授權後、指令真正開始前的幾秒仍顯示「⏸ 等你」；非 Bash 工具授權後會一路顯示到結束。
 - 右側的 `[-]` 是 Claude Code 自己加的收合鈕。
+- `mcp__*` 工具一律算中性：只用 MCP 工具（例如操作模擬器）的 turn 會被當成對話 turn。
+- 問答偵測以 turn 為單位：turn 還沒結束前不知道它是不是對話；上一個 turn 有動作而任務沒判定時，會一直顯示「判斷任務中…」到下一個 turn 開始。
+- 提醒段附加在 system prompt 的 `env_info_simple` 段；若之後版本改名或省略該段，提醒就不會出現（SetStage 的工具說明仍在）。
+- 同一件事做超過 120 分鐘都沒有 SetStage、權威轉換或推測步驟，會變成「上次」；再有任何步驟訊號就回來。
 - Function hooks 仍是 early access，Claude Code 更新可能需要跟著調整。
 
 ## License
