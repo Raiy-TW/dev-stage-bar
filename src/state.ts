@@ -106,6 +106,10 @@ function canSwitch(s: StageState, task: TaskId, rank: number, sessionId: string,
   return rank > cur || (rank === cur && rank === TASK_SIGNAL_RANK.strong)
 }
 
+/** 可被任何任務訊號取代：別的 session 的任務，或本 session 推斷但已過期的任務（本 session 宣告的不算）。 */
+const replaceable = (s: StageState, sessionId: string, now: number): boolean =>
+  s.stageSessionId !== sessionId || (!isFresh(s, sessionId, now) && !taskDeclared(s, sessionId))
+
 const CHANGE_KEYS = ['task', 'taskSource', 'stage', 'source', 'locked', 'handoff', 'badges', 'submitted', 'stageSessionId', 'stageAt'] as const
 
 export function applyClassification(prev: StageState, c: Classification, now: number, sessionId: string, project: ProjectKind): StageState {
@@ -115,13 +119,14 @@ export function applyClassification(prev: StageState, c: Classification, now: nu
   // 任務推斷：依訊號強度（TASK_SIGNAL_RANK）決定能否切換。
   // 別的 session 的任務、或本 session 推斷但已過期的任務：任何訊號都能取代（同任務也重來）。
   // 本 session 宣告的任務即使過期也不被推斷取代。
+  // 寫程式檔推 feature 只在沒有 fresh 任務時（prompt 推測的 bugfix 不會被第一次 Edit 翻成 feature）。
   const candidate: { task: TaskId; rank: number } | undefined = c.task
     ? { task: c.task, rank: c.taskStrength === 'weak' ? TASK_SIGNAL_RANK.weak : TASK_SIGNAL_RANK.strong }
-    : c.codeWrite
+    : c.codeWrite && !isFresh(s, sessionId, now)
       ? { task: 'feature', rank: TASK_SIGNAL_RANK.weak }
       : undefined
   if (candidate) {
-    const stale = s.stageSessionId !== sessionId || (!isFresh(s, sessionId, now) && !taskDeclared(s, sessionId))
+    const stale = replaceable(s, sessionId, now)
     if (stale || canSwitch(s, candidate.task, candidate.rank, sessionId, now)) {
       s = touch(withTask(s, candidate.task, 'inferred', now, candidate.rank, stale), sessionId, now)
     }
@@ -151,6 +156,18 @@ export function applyClassification(prev: StageState, c: Classification, now: nu
 
   const changed = CHANGE_KEYS.some(k => s[k] !== base[k])
   return changed ? { ...s, updatedAt: now } : prev
+}
+
+/**
+ * prompt 意圖（weak 任務訊號）：只在沒有 fresh 任務、且目前任務可被取代時才設定任務與步驟（推測、不鎖）。
+ * 已有 fresh 任務時一律不換：做到一半說「修一下這個 typo」不該把整條翻掉。
+ */
+export function applyPromptIntent(prev: StageState, intent: { task: TaskId; stage: StageId }, now: number, sessionId: string, project: ProjectKind): StageState {
+  const base = forSession(prev, sessionId)
+  if (isFresh(base, sessionId, now) || (base.task && !replaceable(base, sessionId, now))) return prev
+  if (!hasStage(intent.task, intent.stage, project)) return prev
+  const s = withTask(base, intent.task, 'inferred', now, TASK_SIGNAL_RANK.weak, true)
+  return { ...touch(withStage(s, intent.stage, now), sessionId, now), source: 'guess', updatedAt: now }
 }
 
 /** 驗證 SetStage 的輸入：決定任務、確認 stage 屬於該任務；不合法時回錯誤字串（不改狀態）。 */

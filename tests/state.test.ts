@@ -1,5 +1,5 @@
 import { test, expect, describe } from 'claude-code/testing'
-import { emptyState, applyClassification, applySetStage, isFresh, isLocked, resolveSetStage, migrateState, type StageState } from '../src/state.ts'
+import { emptyState, applyClassification, applyPromptIntent, applySetStage, isFresh, isLocked, resolveSetStage, migrateState, type StageState } from '../src/state.ts'
 import { TASK_SIGNAL_RANK, THRESHOLDS } from '../src/stages.ts'
 
 const S1 = 'session-1'
@@ -359,5 +359,54 @@ describe('舊 store 資料相容', () => {
     expect(migrateState(undefined)).toEqual(emptyState())
     expect(migrateState({ foo: 1 })).toEqual(emptyState())
     expect(migrateState({ stage: 'nope', stageSince: 1, updatedAt: 2, source: 'guess' }).stage).toBeNull()
+  })
+})
+
+describe('prompt 意圖（weak 任務訊號）', () => {
+  const BUG = { task: 'bugfix', stage: 'reproduce' } as const
+  test('沒有任務 → 推測 bugfix／重現，fresh、未鎖', async () => {
+    const s = applyPromptIntent(emptyState(), BUG, 1000, S1, 'ios')
+    expect(s.task).toBe('bugfix')
+    expect(s.taskSource).toBe('inferred')
+    expect(s.taskRank).toBe(TASK_SIGNAL_RANK.weak)
+    expect(s.stage).toBe('reproduce')
+    expect(s.source).toBe('guess')
+    expect(isLocked(s, S1)).toBe(false)
+    expect(isFresh(s, S1, 1000)).toBe(true)
+  })
+  test('有 fresh 任務（宣告或推測）→ 不換：「修一下這個 typo」不會把 feature 翻成 bugfix', async () => {
+    const decl = feature('impl', 1000, S1)
+    expect(applyPromptIntent(decl, BUG, 2000, S1, 'ios')).toBe(decl)
+    const inferred = applyPromptIntent(emptyState(), { task: 'work', stage: 'clarify' }, 1000, S1, 'ios')
+    expect(applyPromptIntent(inferred, BUG, 2000, S1, 'ios')).toBe(inferred)
+  })
+  test('別的 session 的舊任務 → 取代（同任務也重來）', async () => {
+    const old = applySetStage(emptyState(), { task: 'bugfix', stage: 'fix' }, 0, 'old')
+    const s = applyPromptIntent(old, BUG, 1000, S1, 'ios')
+    expect(s.task).toBe('bugfix')
+    expect(s.stage).toBe('reproduce')
+    expect(s.taskSource).toBe('inferred')
+    expect(isFresh(s, S1, 1000)).toBe(true)
+  })
+  test('本 session 宣告的任務過期了也不取代', async () => {
+    const decl = feature('impl', 0, S1)
+    expect(applyPromptIntent(decl, BUG, STALE + 1, S1, 'ios').task).toBe('feature')
+  })
+  test('prompt 推測的 bugfix 之後第一次寫程式檔 → 仍是 bugfix（寫程式檔推 feature 只在沒有 fresh 任務時）', async () => {
+    let s = applyPromptIntent(emptyState(), BUG, 1000, S1, 'ios')
+    s = applyClassification(s, { codeWrite: true, other: true }, 2000, S1, 'ios')
+    expect(s.task).toBe('bugfix')
+    expect(s.stage).toBe('reproduce')
+  })
+  test('fresh 的低強度推測任務（舊版 rank 1）也不被寫程式檔翻成 feature', async () => {
+    const weakWork: StageState = { task: 'work', taskSource: 'inferred', taskRank: 1, stage: 'research', stageSince: 1000, updatedAt: 1000, source: 'guess', sessionId: S1, stageSessionId: S1, stageAt: 1000 }
+    const s = applyClassification(weakWork, { codeWrite: true, other: true }, 2000, S1, 'ios')
+    expect(s.task).toBe('work')
+  })
+  test('明確的工具訊號（strong）仍可覆蓋 prompt 推測的任務', async () => {
+    let s = applyPromptIntent(emptyState(), { task: 'feature', stage: 'intent' }, 1000, S1, 'ios')
+    s = applyClassification(s, { task: 'bugfix', taskStrength: 'strong', authority: 'diagnose' }, 2000, S1, 'ios')
+    expect(s.task).toBe('bugfix')
+    expect(s.stage).toBe('diagnose')
   })
 })

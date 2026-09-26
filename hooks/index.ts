@@ -5,12 +5,15 @@ import type { EngineInterface, Register } from 'claude-code'
 import { ALL_STAGE_IDS, TASKS, TASK_IDS, THRESHOLDS, TICK_MS, type ProjectKind } from '../src/stages.ts'
 import { stageIds, stagesFor } from '../src/tasks.ts'
 import { agentShortName, callLabel, classify, type ToolEvent } from '../src/rules.ts'
-import { applyClassification, applySetStage, emptyState, migrateState, resolveSetStage, type StageState } from '../src/state.ts'
+import { classifyPrompt } from '../src/intent.ts'
+import { applyClassification, applyPromptIntent, applySetStage, emptyState, migrateState, resolveSetStage, type StageState } from '../src/state.ts'
 import { renderLines, lineText, type Activity, type AgentRow, type InFlight, type Line, type Thresholds } from '../src/format.ts'
 
 const SET_STAGE = 'SetStage'
 /** 提醒段附加在這個 system prompt 段尾（實測每個 session 都有、內容穩定，不打壞 prompt cache）。 */
 const REMINDER_SECTION = 'env_info_simple'
+/** 只有這些來源算「使用者自己送出的 prompt」（Enter、Remote Control）；通知、peer、排程等不判斷意圖。 */
+const PERSON_ORIGINS: ReadonlySet<string> = new Set(['composer', 'bridge'])
 const MAIN = 'main'
 /** 給排版留 1 欄餘裕，避免 ambiguous-width 字元在某些字型下多佔一欄造成折行。 */
 const SAFETY_COLUMNS = 1
@@ -189,6 +192,20 @@ function onSetStage(e: Record<string, unknown>): string {
   return `已設為 ${TASKS[resolved.task].label} · ${label}（${resolved.stage}）${input.detail ? ` · ${input.detail}` : ''}${input.milestone ? ` · ${input.milestone}` : ''}`
 }
 
+/** midTurn：prompt 是在 turn 進行中打的（會送進那個 turn），不抹掉那個 turn 已有的動作。 */
+function onPrompt(text: string, midTurn: boolean): void {
+  const intent = classifyPrompt(text)
+  if (intent === 'chat') {
+    // 問答：送出當下就顯示（不等 turn.complete）；這個 turn 若有動作，既有邏輯接手。
+    lastTurn = 'chat'
+    if (!midTurn) turnActed = false
+  } else if (intent) {
+    // 要求動手：上一輪的「討論中」不再適用。
+    lastTurn = undefined
+    persist(applyPromptIntent(state, intent, nowSync(), sessionId, project))
+  }
+}
+
 /** system prompt 的提醒段：只在 SetStage 註冊成功後加，用實際註冊到的完整工具名。 */
 function stageReminder(tool: string): string {
   return [
@@ -271,6 +288,17 @@ export const register: Register = on => {
     }
     invalidateIfChanged($, nowSync())
     return r
+  })
+
+  // 使用者的 prompt：純本地關鍵字判斷意圖（不呼叫模型）。原樣放行，判斷在 next 之前同步做完、不 await 任何 $。
+  on('prompt.submit', ($, e, next) => {
+    try {
+      if (enabled && PERSON_ORIGINS.has(e.origin.kind)) onPrompt(e.text, e.turnId !== undefined)
+      invalidateIfChanged($, nowSync())
+    } catch {
+      // 只影響顯示。
+    }
+    return next(e)
   })
 
   on('prompt.section', { name: REMINDER_SECTION }, async ($, e, next) => {
