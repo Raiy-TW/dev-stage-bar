@@ -190,6 +190,11 @@ describe('點線進度條', () => {
     expect(lineText(lines[1]!).trim()).toBe('部署 · 0m')
   })
 
+  test('延續上個 session 宣告的任務時，任務名附「推測」', async () => {
+    const old = applySetStage(emptyState(), { task: 'bugfix', stage: 'fix' }, T0 - 17 * 60 * MIN, 'old')
+    const revived = applyClassification(old, { guess: 'verify' }, T0, S, 'ios')
+    expect(lineText(renderLines(revived, act(), opts(120))[0]!).startsWith('修bug 推測 ●')).toBe(true)
+  })
   test('宣告的任務名用主色；推斷的任務名 dim 並附「推測」', async () => {
     const declared = renderLines(applySetStage(emptyState(), { task: 'bugfix', stage: 'fix' }, T0, S), act(), opts(120))[0]!
     expect(declared[0]).toEqual(expect.objectContaining({ text: '修bug', color: COLORS.current }))

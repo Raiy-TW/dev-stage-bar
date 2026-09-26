@@ -49,10 +49,18 @@ export function isFresh(s: StageState, sessionId: string, now: number, staleMin:
 /** 記下「本 session 此刻設定了任務／步驟」。 */
 const touch = (s: StageState, sessionId: string, now: number): StageState => ({ ...s, stageSessionId: sessionId, stageAt: now })
 
-/** 延續不 fresh 的舊步驟：計時重來，舊的 detail／已送審不帶過來。 */
-function revive(s: StageState, now: number): StageState {
+/**
+ * 延續不 fresh 的舊步驟：計時重來，舊的 detail／已送審不帶過來。
+ * 延續的是別的 session 宣告的任務時，本 session 並沒有宣告：改標為推測（strong）。
+ */
+function revive(s: StageState, now: number, sessionId: string): StageState {
   const { detail: _d, submitted: _s, ...rest } = s
-  return { ...rest, stageSince: now }
+  const revived: StageState = { ...rest, stageSince: now }
+  if (s.stageSessionId !== sessionId && s.taskSource === 'declared') {
+    revived.taskSource = 'inferred'
+    revived.taskRank = TASK_SIGNAL_RANK.strong
+  }
+  return revived
 }
 
 /** 換 session 時，清掉只屬於上個 session 的欄位。 */
@@ -82,10 +90,11 @@ function withTask(s: StageState, task: TaskId, source: TaskSource, now: number, 
   return { ...rest, task, taskSource: source, stage: null, stageSince: now, ...(source === 'inferred' && rank !== undefined ? { taskRank: rank } : {}) }
 }
 
-/** 目前任務的強度：不 fresh 的為 0；本 session 宣告的不可被推斷覆蓋；宣告過（被延續）的算 strong。 */
+/** 目前任務的強度：本 session 宣告的不可被推斷覆蓋（過期也一樣）；其餘不 fresh 的為 0；宣告過的算 strong。 */
 function currentRank(s: StageState, sessionId: string, now: number): number {
-  if (!s.task || !isFresh(s, sessionId, now)) return 0
+  if (!s.task) return 0
   if (taskDeclared(s, sessionId)) return Number.POSITIVE_INFINITY
+  if (!isFresh(s, sessionId, now)) return 0
   if (s.taskSource === 'declared') return TASK_SIGNAL_RANK.strong
   return s.taskRank ?? TASK_SIGNAL_RANK.strong
 }
@@ -103,14 +112,16 @@ export function applyClassification(prev: StageState, c: Classification, now: nu
   const base = forSession(prev, sessionId)
   let s = base
 
-  // 任務推斷：依訊號強度（TASK_SIGNAL_RANK）決定能否切換；不 fresh 的任務任何訊號都能取代（同任務也重來）。
+  // 任務推斷：依訊號強度（TASK_SIGNAL_RANK）決定能否切換。
+  // 別的 session 的任務、或本 session 推斷但已過期的任務：任何訊號都能取代（同任務也重來）。
+  // 本 session 宣告的任務即使過期也不被推斷取代。
   const candidate: { task: TaskId; rank: number } | undefined = c.task
     ? { task: c.task, rank: c.taskStrength === 'weak' ? TASK_SIGNAL_RANK.weak : TASK_SIGNAL_RANK.strong }
     : c.codeWrite
       ? { task: 'feature', rank: TASK_SIGNAL_RANK.weak }
       : undefined
   if (candidate) {
-    const stale = !isFresh(s, sessionId, now)
+    const stale = s.stageSessionId !== sessionId || (!isFresh(s, sessionId, now) && !taskDeclared(s, sessionId))
     if (stale || canSwitch(s, candidate.task, candidate.rank, sessionId, now)) {
       s = touch(withTask(s, candidate.task, 'inferred', now, candidate.rank, stale), sessionId, now)
     }
@@ -122,13 +133,17 @@ export function applyClassification(prev: StageState, c: Classification, now: nu
   // 寫程式檔推斷出 feature 但還沒有步驟 → 實作中（避免「有任務卻沒有目前點」）。
   const guess = c.guess ?? (c.codeWrite && s.task === 'feature' && s.stage === null ? 'impl' : undefined)
   if (fits(c.authority)) {
-    const base = fresh ? s : revive(s, now)
+    const base = fresh ? s : revive(s, now, sessionId)
     s = touch({ ...withStage(base, c.authority, now), source: 'authority', locked: true }, sessionId, now)
   } else if (fits(guess)) {
-    // 本 session 已鎖（SetStage／權威）時推測不改步驟，但表示仍在工作，照樣刷新 stageAt。
-    const base = fresh ? s : revive(s, now)
+    // 本 session 已鎖（SetStage／權威）時推測不改步驟，但表示仍在工作，照樣刷新 stageAt（與下面的動作刷新一致）。
+    const base = fresh ? s : revive(s, now, sessionId)
     const move = guess !== base.stage && (!fresh || !isLocked(base, sessionId))
     s = touch(move ? { ...withStage(base, guess, now), source: 'guess' } : base, sessionId, now)
+  } else if (c.other && s.task && s.stageSessionId === sessionId) {
+    // 本 session 的主迴圈動作（改檔、非唯讀指令、派 subagent…）= 仍在做這件事：刷新 stageAt，不改步驟。
+    // 只有問答／閒置會讓它過期；別的 session 的舊任務不因動作而延續。
+    s = touch(s, sessionId, now)
   }
   if (c.handoff && s.handoff !== c.handoff) s = { ...s, handoff: c.handoff }
   if (c.badge && !(s.badges ?? []).includes(c.badge)) s = { ...s, badges: [...(s.badges ?? []), c.badge] }

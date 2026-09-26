@@ -248,9 +248,44 @@ describe('新鮮度：只有設定任務／步驟的事件寫 stageSessionId／s
     expect(again.detail).toBeUndefined()
     expect(isFresh(again, S1, 1000)).toBe(true)
   })
-  test('同 session 但過了門檻（含已鎖）：宣告的任務也可被推斷取代', async () => {
+  test('同 session 宣告的任務過了門檻也不被推斷取代', async () => {
     const s = applyClassification(feature('impl', 0, S1), { task: 'bugfix', taskStrength: 'strong' }, STALE + 1, S1, 'ios')
+    expect(s.task).toBe('feature')
+    expect(s.taskSource).toBe('declared')
+  })
+  test('同 session 宣告 bugfix → 121 分鐘 → 寫程式檔：仍是 bugfix／fix，且回到 fresh', async () => {
+    const decl = applySetStage(emptyState(), { task: 'bugfix', stage: 'fix' }, 0, S1)
+    const s = applyClassification(decl, { codeWrite: true, other: true }, STALE + MIN, S1, 'ios')
     expect(s.task).toBe('bugfix')
+    expect(s.taskSource).toBe('declared')
+    expect(s.stage).toBe('fix')
+    expect(isFresh(s, S1, STALE + MIN)).toBe(true)
+  })
+  test('本 session 的動作（other）刷新 stageAt、不改步驟：一直在工作就不會過期', async () => {
+    let s = applySetStage(emptyState(), { task: 'bugfix', stage: 'fix' }, 0, S1)
+    for (let t = 30; t <= 240; t += 30) s = applyClassification(s, { other: true }, t * MIN, S1, 'ios')
+    expect(s.stage).toBe('fix')
+    expect(s.stageSince).toBe(0)
+    expect(isFresh(s, S1, 250 * MIN)).toBe(true)
+  })
+  test('別的 session 的舊任務：動作（other）不刷新（只有步驟／任務訊號能延續）', async () => {
+    const old = applySetStage(emptyState(), { task: 'bugfix', stage: 'fix' }, 0, 'old')
+    const s = applyClassification(old, { other: true, badge: 'mutation' }, 1000, S1, 'ios')
+    expect(isFresh(s, S1, 1000)).toBe(false)
+    expect(s.stageSessionId).toBe('old')
+  })
+  test('同 session 推斷的任務過期後，任務訊號可取代', async () => {
+    const inf = applyClassification(emptyState(), { task: 'bugfix', taskStrength: 'weak' }, 0, S1, 'ios')
+    const s = applyClassification(inf, { task: 'feature', taskStrength: 'weak' }, STALE + 1, S1, 'ios')
+    expect(s.task).toBe('feature')
+  })
+  test('延續上個 session 宣告的任務 → 改標為推測（strong），本 session 還沒宣告', async () => {
+    const old = applySetStage(emptyState(), { task: 'bugfix', stage: 'fix' }, 0, 'old')
+    const g = applyClassification(old, { guess: 'verify' }, 1000, S1, 'ios')
+    expect(g.taskSource).toBe('inferred')
+    expect(g.taskRank).toBe(TASK_SIGNAL_RANK.strong)
+    const a = applyClassification(old, { authority: 'review' }, 1000, S1, 'ios')
+    expect(a.taskSource).toBe('inferred')
   })
   test('本 session 的步驟訊號符合舊任務的步驟表 → 延續舊任務並變 fresh（計時重來、清舊 detail）', async () => {
     const old = feature('impl', 0, 'old', { detail: 'T3/5', milestone: 'M48' })
