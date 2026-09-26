@@ -176,7 +176,7 @@ export function resolveSetStage(prev: StageState, input: { task?: unknown; stage
 
 export function applySetStage(prev: StageState, input: SetStageInput, now: number, sessionId: string): StageState {
   const cur = forSession(prev, sessionId)
-  const base = isFresh(cur, sessionId, now) ? cur : revive(cur, now)
+  const base = isFresh(cur, sessionId, now) ? cur : revive(cur, now, sessionId)
   const s = withStage(withTask(base, input.task, 'declared', now), input.stage, now)
   const next: StageState = { ...touch(s, sessionId, now), source: 'setstage', locked: true, taskDeclared: true, updatedAt: now }
   if (input.detail) next.detail = input.detail
