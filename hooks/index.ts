@@ -28,6 +28,10 @@ let setStageTool = ''
 let state: StageState = emptyState()
 let th: Thresholds = THRESHOLDS
 let isWorking = false
+/** 目前主迴圈 turn 已有非讀取動作（turn.start 重設）。 */
+let turnActed = false
+/** 最近一個完成的主迴圈 turn 是對話（只有讀取類／中性工具或沒有工具）。 */
+let lastTurnChat = false
 let lastEventAt: number | null = null
 let lastSignature = ''
 const lastEventByOwner: Record<string, number> = {}
@@ -67,7 +71,7 @@ function parseMinutes(raw: string | undefined, fallback: number): number {
 }
 
 function activity(now: number): Activity {
-  return { now, isWorking, lastEventAt, lastEventByOwner: { ...lastEventByOwner }, calls: [...calls.values()], agents }
+  return { now, isWorking, lastEventAt, lastEventByOwner: { ...lastEventByOwner }, calls: [...calls.values()], agents, turnActed, lastTurnChat }
 }
 
 function signature(now: number): string {
@@ -143,7 +147,11 @@ type CallEvent = ToolEvent & { tool_use_id: string }
 function onCallStart(e: CallEvent): void {
   const now = nowSync()
   markEvent(e.agentId ?? MAIN, now)
-  persist(applyClassification(state, classify(e), now, sessionId, project))
+  const c = classify(e)
+  const updated = applyClassification(state, c, now, sessionId, project)
+  // 改了任務／步驟的 turn 不算對話（例如只呼叫了 ios-diagnose 這類 skill）。
+  if (c.other || updated.task !== state.task || updated.stage !== state.stage || updated.stageAt !== state.stageAt) turnActed = true
+  persist(updated)
   const call: InFlight = { id: e.tool_use_id, tool: e.tool, label: callLabel(e), startedAt: now }
   if (e.agentId) call.agentId = e.agentId
   calls.set(e.tool_use_id, call)
@@ -172,6 +180,7 @@ function onSetStage(e: Record<string, unknown>): string {
   if (typeof e.detail === 'string' && e.detail) input.detail = e.detail
   if (typeof e.milestone === 'string' && e.milestone) input.milestone = e.milestone
   persist(applySetStage(state, input, now, sessionId))
+  turnActed = true
   const label = stagesFor(resolved.task, project).find(s => s.id === resolved.stage)?.label ?? resolved.stage
   return `已設為 ${TASKS[resolved.task].label} · ${label}（${resolved.stage}）${input.detail ? ` · ${input.detail}` : ''}${input.milestone ? ` · ${input.milestone}` : ''}`
 }
@@ -235,6 +244,8 @@ export const register: Register = on => {
     if (!enabled) return r
     // 新的主迴圈 turn 開始時，上一輪主迴圈不可能還有進行中的呼叫：清掉殘留（中斷時可能漏收結束）。
     for (const [k, c] of calls) if (!c.agentId) calls.delete(k)
+    // turn.start 只在主迴圈觸發（subagent 的 run 沒有 turn.start）。
+    turnActed = false
     try {
       // /clear 不會重跑 session.start，但 session id 會換：換了就讓 session 範圍的鎖／badge／接手標記失效。
       const id = await $.session.id()
@@ -243,6 +254,20 @@ export const register: Register = on => {
       // 只影響顯示。
     }
     invalidateIfChanged($, nowSync())
+    return r
+  })
+
+  // 主迴圈 turn 結束：本 turn 沒有任何動作 → 對話 turn（只影響顯示，不改任務／步驟）。
+  on('turn.complete', async ($, e, next) => {
+    const r = await next(e)
+    try {
+      if (enabled && !e.agentId) {
+        lastTurnChat = !turnActed
+        invalidateIfChanged($, nowSync())
+      }
+    } catch {
+      // 只影響顯示。
+    }
     return r
   })
 

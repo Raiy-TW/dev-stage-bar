@@ -157,11 +157,17 @@ describe('點線進度條', () => {
     expect(displayWidth(l9)).toBeGreaterThanOrEqual(xs[8]!)
   })
 
-  test('尚未判定任務：只畫一行 dim 的「判斷任務中…」，不畫點線', async () => {
+  test('沒有任務、本 turn 沒有動作：只畫一行 dim 的「問答中」，不畫點線', async () => {
     const lines = renderLines(emptyState(), act(), opts(160))
     expect(lines).toHaveLength(1)
-    expect(lineText(lines[0]!)).toBe('判斷任務中…')
+    expect(lineText(lines[0]!)).toBe('問答中')
     expect(lines[0]!.every(s => s.dim)).toBe(true)
+  })
+  test('沒有任務、本 turn 已有動作：「判斷任務中…」；舊任務一律接「上次」', async () => {
+    expect(lineText(renderLines(emptyState(), act({ turnActed: true }), opts(160))[0]!)).toBe('判斷任務中…')
+    const old = applySetStage(emptyState(), { task: 'feature', stage: 'ship' }, T0 - 17 * 60 * MIN, 'old')
+    expect(lineText(renderLines(old, act(), opts(160))[0]!)).toBe('問答中 · 上次：新功能 · TF · 17 小時前')
+    expect(lineText(renderLines(old, act({ turnActed: true }), opts(160))[0]!)).toBe('判斷任務中… · 上次：新功能 · TF · 17 小時前')
   })
 
   test('有任務但尚未進入步驟：任務名＋全部 ○ 與 ┄，不畫第 2 行', async () => {
@@ -245,6 +251,36 @@ describe('點線進度條', () => {
         expect(displayWidth(lineText(l))).toBeLessThanOrEqual(cols)
       }
     }
+  })
+})
+
+describe('問答：討論中', () => {
+  const fresh = applySetStage(emptyState(), { task: 'feature', stage: 'impl' }, T0 - 3 * MIN, S)
+  const o = { sessionId: S, columns: 160, maxRows: 5, th: THRESHOLDS, project: 'ios' as const }
+  test('最近完成的 turn 是對話、沒在跑工具 → 第三行 dim「討論中」（剛有讀取事件也一樣）', async () => {
+    for (const a of [act({ lastTurnChat: true }), act({ lastTurnChat: true, lastEventAt: T0 - MIN })]) {
+      const lines = renderLines(fresh, a, o)
+      expect(lines).toHaveLength(3)
+      expect(lineText(lines[2]!)).toBe('討論中')
+      expect(lines[2]!.every(s => s.dim)).toBe(true)
+    }
+  })
+  test('badge 照舊接在「討論中」後面', async () => {
+    const st = applyClassification(fresh, { badge: 'debug' }, T0, S, 'ios')
+    expect(lineText(renderLines(st, act({ lastTurnChat: true }), o)[2]!)).toBe('討論中   [debug]')
+  })
+  test('有工具在跑、或本 turn 已有動作 → 不顯示「討論中」', async () => {
+    const running = act({ lastTurnChat: true, lastEventAt: T0, calls: [{ id: 'c', tool: 'Read', label: 'Read', startedAt: T0 }] })
+    expect(renderLines(fresh, running, o).map(lineText).join('\n')).not.toContain('討論中')
+    expect(renderLines(fresh, act({ lastTurnChat: true, turnActed: true }), o).map(lineText).join('\n')).not.toContain('討論中')
+  })
+  test('卡住仍優先於「討論中」', async () => {
+    const a = act({ lastTurnChat: true, isWorking: true, lastEventAt: T0 - 11 * MIN })
+    expect(lineText(renderLines(fresh, a, o)[2]!)).toContain('⚠')
+  })
+  test('沒有 fresh 任務時第三行不寫「討論中」（第一行已是「問答中」），也不寫「執行中」', async () => {
+    const lines = renderLines(emptyState(), act({ lastTurnChat: true, lastEventAt: T0 - MIN }), o)
+    expect(lines.map(lineText)).toEqual(['問答中'])
   })
 })
 

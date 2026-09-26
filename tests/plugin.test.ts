@@ -34,6 +34,7 @@ async function boot($: any, on: any, o: Opts = {}) {
     return { value: o.agents ?? [] }
   })
   on('turn.start', ($: any, e: any) => ({ turnId: e.turnId }))
+  on('turn.complete', ($: any, e: any) => ({ text: e.answer }))
   on('tool.check', () => ({ decision: 'ask' }))
   on('ui.render', () => ({ type: 'engine', ref: 0 }))
   // 最底層的工具實作：Bash 的 sleep 會在 mock clock 上等 30 分鐘。
@@ -66,15 +67,15 @@ async function band($: any, over: Record<string, unknown> = {}): Promise<string[
 }
 
 describe('啟用條件', () => {
-  test('非 iOS 專案也啟用：註冊 SetStage、畫「判斷任務中…」', async ($, on) => {
+  test('非 iOS 專案也啟用：註冊 SetStage、還沒有動作時畫「問答中」', async ($, on) => {
     const { registered } = await boot($, on, { ios: false })
     expect(registered).toContain('SetStage')
-    expect(await band($)).toEqual(['判斷任務中…'])
+    expect(await band($)).toEqual(['問答中'])
   })
-  test('iOS 專案：註冊 SetStage；未判定任務時畫「判斷任務中…」', async ($, on) => {
+  test('iOS 專案：註冊 SetStage；還沒有動作時畫「問答中」', async ($, on) => {
     const { registered } = await boot($, on)
     expect(registered).toContain('SetStage')
-    expect(await band($)).toEqual(['判斷任務中…'])
+    expect(await band($)).toEqual(['問答中'])
   })
   test('非 iOS 專案 feature 用 default 標籤：8 點、ship=部署', async ($, on) => {
     await boot($, on, { ios: false })
@@ -89,7 +90,7 @@ describe('啟用條件', () => {
   test('每列是一個 truncate-end 的 Text（寬度估錯時截斷，不折行）', async ($, on) => {
     await boot($, on)
     const ui = await $.ui.mount({ plugin: PLUGIN, surface: 'terminal', component: 'AbovePrompt', props: PROPS() as any })
-    const row = await ui.find({ type: 'Text', text: /判斷任務中/ })
+    const row = await ui.find({ type: 'Text', text: /問答中/ })
     expect(row?.props.wrap).toBe('truncate-end')
     await ui.unmount()
   })
@@ -250,6 +251,65 @@ describe('新鮮度（截圖：舊推測被新 session 的 badge 洗白）', () 
     const rows = await band($)
     expect(rows[0]).toMatch(/^修bug ●━+◉/)
     expect(rows[1]?.trim()).toBe('診斷 · 0m')
+  })
+})
+
+const turnStart = ($: any, turnId: string) => $.turn.start({ text: 'q', turnId } as any)
+const turnComplete = ($: any, turnId: string, agentId?: string) =>
+  $.turn.complete({ answer: 'a', durationMs: 1000, isAborted: false, turnId, reason: 'answer', ...(agentId ? { agentId } : {}) } as any)
+
+describe('問答偵測（d）', () => {
+  test('沒有 fresh 任務：零工具 turn 後畫「問答中」；舊任務接「上次」', async ($, on) => {
+    await boot($, on, { store: { [`stage:${CWD}`]: { task: 'feature', stage: 'ship', stageSince: T0, updatedAt: T0 - 17 * 60 * MIN, source: 'guess', sessionId: 'old' } } })
+    await turnStart($, 't1')
+    await turnComplete($, 't1')
+    const rows = await band($)
+    expect(rows[0]).toBe('問答中 · 上次：新功能 · TF · 17 小時前')
+  })
+  test('本 turn 出現非讀取動作但任務未判定 → 「判斷任務中…」；讀取類不算', async ($, on) => {
+    await boot($, on, { ios: false })
+    await turnStart($, 't1')
+    await $.tool.call({ tool: 'Read', file_path: '/x' } as any)
+    expect((await band($))[0]).toBe('問答中')
+    await $.tool.call({ tool: 'Bash', command: 'npm run build' } as any)
+    expect((await band($))[0]).toBe('判斷任務中…')
+    await turnStart($, 't2')
+    expect((await band($))[0]).toBe('問答中')
+  })
+  test('有 fresh 任務：讀取類 turn 後第三行「討論中」，任務／步驟不變', async ($, on) => {
+    const { clock } = await boot($, on)
+    await turnStart($, 't1')
+    await $.tool.call({ tool: TOOL, task: 'feature', stage: 'impl', detail: 'T2/5' } as any)
+    await turnComplete($, 't1')
+    const before = await band($)
+    expect(before.join('\n')).not.toContain('討論中')
+    await clock.advance(3 * MIN)
+    await turnStart($, 't2')
+    await $.tool.call({ tool: 'Read', file_path: '/x' } as any)
+    await $.tool.call({ tool: 'Grep', pattern: 'x' } as any)
+    await turnComplete($, 't2')
+    const rows = await band($)
+    expect(rows[0]).toBe(before[0])
+    expect(rows[1]?.trim()).toBe('實作 · T2/5 · 3m')
+    expect(rows[2]).toBe('討論中')
+  })
+  test('subagent 的 turn.complete 不算主迴圈的對話 turn', async ($, on) => {
+    await boot($, on)
+    await turnStart($, 't1')
+    await $.tool.call({ tool: TOOL, task: 'feature', stage: 'impl' } as any)
+    await turnComplete($, 'sub-1', 'a1')
+    expect((await band($)).join('\n')).not.toContain('討論中')
+  })
+  test('零工具 turn：有 fresh 任務時第三行「討論中」', async ($, on) => {
+    await boot($, on)
+    await turnStart($, 't1')
+    await $.tool.call({ tool: TOOL, task: 'bugfix', stage: 'diagnose' } as any)
+    await turnComplete($, 't1')
+    await turnStart($, 't2')
+    await turnComplete($, 't2')
+    const rows = await band($)
+    expect(rows[0]).toMatch(/^修bug ●━+◉/)
+    expect(rows[2]).toBe('討論中')
   })
 })
 

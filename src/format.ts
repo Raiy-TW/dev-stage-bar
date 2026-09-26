@@ -28,6 +28,10 @@ export type Activity = {
   calls: readonly InFlight[]
   /** 進行中的 subagent。 */
   agents: readonly AgentRow[]
+  /** 目前（或剛結束）的主迴圈 turn 已有非讀取動作（改檔、非唯讀指令、派 subagent、SetStage、改了任務／步驟）。 */
+  turnActed?: boolean
+  /** 最近一個完成的主迴圈 turn 只有讀取類／中性工具或完全沒工具：對話 turn。 */
+  lastTurnChat?: boolean
 }
 
 export type Seg = { text: string; color?: string; bold?: boolean; dim?: boolean; inverse?: boolean }
@@ -38,6 +42,8 @@ export type Status = { kind: StatusKind; text: string }
 
 const MIN = 60_000
 const PENDING_TEXT = '判斷任務中…'
+const CHAT_TEXT = '問答中'
+const DISCUSS_TEXT = '討論中'
 const INFERRED_MARK = '推測'
 const LAST_MARK = '上次：'
 const MAIN = 'main'
@@ -197,14 +203,23 @@ function alignUnder(label: Line, x: number, columns: number): Line {
   return start > 0 ? [{ text: ' '.repeat(start) }, ...fitted] : fitted
 }
 
-/** 沒有 fresh 任務：一行 dim。有舊任務時畫「上次：…」，否則「判斷任務中…」。 */
-function notNowLine(state: StageState, project: ProjectKind, now: number, columns: number): Line {
-  return fitLine([{ text: state.task ? lastText(state, project, now) : PENDING_TEXT, dim: true }], columns)
+/**
+ * 沒有 fresh 任務：一行 dim。本 turn 已有動作 →「判斷任務中…」，否則「問答中」；
+ * 有舊任務時接「 · 上次：新功能 · TF · 17 小時前」。
+ */
+function notNowLine(state: StageState, project: ProjectKind, act: Activity, columns: number): Line {
+  const head = act.turnActed ? PENDING_TEXT : CHAT_TEXT
+  const text = state.task ? `${head} · ${lastText(state, project, act.now)}` : head
+  return fitLine([{ text, dim: true }], columns)
 }
 
+/** 對話中：最近完成的 turn 是對話、本 turn 還沒有動作、也沒有工具或 subagent 在跑。 */
+const chatting = (act: Activity): boolean => !!act.lastTurnChat && !act.turnActed && act.calls.length === 0 && act.agents.length === 0
+
 /** 窄版單行：修bug ●◉○○○○○ 診斷 · 12m */
-function compactLine(state: StageState, project: ProjectKind, now: number, fresh: boolean, columns: number): Line {
-  if (!fresh) return notNowLine(state, project, now, columns)
+function compactLine(state: StageState, project: ProjectKind, act: Activity, fresh: boolean, columns: number): Line {
+  if (!fresh) return notNowLine(state, project, act, columns)
+  const now = act.now
   const stages = stagesOf(state, project)
   const idx = stageIndex(state, stages)
   const line: Line = [...taskPrefix(state), ...stages.map((_, i) => dotSeg(i, idx))]
@@ -214,12 +229,13 @@ function compactLine(state: StageState, project: ProjectKind, now: number, fresh
 }
 
 /** 第 1、2 行（第 2 行可能為空）；窄到點距不足時為單行。 */
-function progressLines(state: StageState, project: ProjectKind, now: number, fresh: boolean, columns: number): { bar: Line; label?: Line } {
-  if (!fresh) return { bar: notNowLine(state, project, now, columns) }
+function progressLines(state: StageState, project: ProjectKind, act: Activity, fresh: boolean, columns: number): { bar: Line; label?: Line } {
+  if (!fresh) return { bar: notNowLine(state, project, act, columns) }
+  const now = act.now
   const stages = stagesOf(state, project)
   const prefix = taskPrefix(state)
   const gap = dotGap(state, stages.length, width(prefix), columns)
-  if (columns < NARROW_COLUMNS || gap < 1) return { bar: compactLine(state, project, now, fresh, columns) }
+  if (columns < NARROW_COLUMNS || gap < 1) return { bar: compactLine(state, project, act, fresh, columns) }
   const { line, xs } = dotsLine(state, stages, prefix, gap)
   const label = stageLabel(state, stages, now)
   const idx = stageIndex(state, stages)
@@ -243,7 +259,7 @@ function activityParts(act: Activity, th: Thresholds): string[] {
   return parts
 }
 
-function activityLine(state: StageState, act: Activity, st: Status, sessionId: string, columns: number, th: Thresholds): Line | undefined {
+function activityLine(state: StageState, act: Activity, st: Status, sessionId: string, fresh: boolean, columns: number, th: Thresholds): Line | undefined {
   const badges = state.sessionId === sessionId ? state.badges ?? [] : []
   const badgeText = badges.map(b => `[${b}]`).join(' ')
   let body: Line
@@ -253,7 +269,12 @@ function activityLine(state: StageState, act: Activity, st: Status, sessionId: s
     return fitLine(body, columns)
   }
   const parts = activityParts(act, th)
-  if (st.kind === 'waiting') {
+  if ((st.kind === 'running' || st.kind === 'idle') && chatting(act)) {
+    // 對話 turn 剛結束：有 fresh 任務時寫「討論中」；沒有時第 1 行已是「問答中」，這裡只留 badge。
+    if (fresh) body = [{ text: DISCUSS_TEXT, dim: true }]
+    else if (badgeText) body = [{ text: '·', dim: true }]
+    else return undefined
+  } else if (st.kind === 'waiting') {
     body = [{ text: st.text, color: COLORS.waiting, bold: true }]
     if (parts.length) body.push({ text: ` · ${parts.join(' · ')}` })
   } else if (st.kind === 'running') {
@@ -276,9 +297,9 @@ export type LayoutOptions = { sessionId: string; columns: number; maxRows: numbe
 export function renderLines(state: StageState, act: Activity, o: LayoutOptions): Line[] {
   const fresh = isFresh(state, o.sessionId, act.now, o.th.staleAfterMin)
   // 只有一列可用：窄版單行（點＋階段文字）。
-  if (o.maxRows < 2) return [compactLine(state, o.project, act.now, fresh, o.columns)]
-  const { bar, label } = progressLines(state, o.project, act.now, fresh, o.columns)
-  const activity = activityLine(state, act, evaluateStatus(state, act, o.th, fresh), o.sessionId, o.columns, o.th)
+  if (o.maxRows < 2) return [compactLine(state, o.project, act, fresh, o.columns)]
+  const { bar, label } = progressLines(state, o.project, act, fresh, o.columns)
+  const activity = activityLine(state, act, evaluateStatus(state, act, o.th, fresh), o.sessionId, fresh, o.columns, o.th)
   const lines: Line[] = [bar]
   if (o.maxRows >= 3 || !label || !activity) {
     if (label) lines.push(label)
