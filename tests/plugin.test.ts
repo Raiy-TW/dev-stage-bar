@@ -193,10 +193,10 @@ describe('階段判斷（經由 hooks）', () => {
     expect(rows[0]).toMatch(/^修bug 推測 ●━+◉/)
     expect(rows[1]?.trim()).toMatch(/^診斷 · /)
   })
-  test('work 推斷：主迴圈連續讀取類呼叫達門檻', async ($, on) => {
+  test('讀取類呼叫再多也不推斷 work（沒有點線）', async ($, on) => {
     await boot($, on, { ios: false })
-    for (let i = 0; i < 8; i++) await $.tool.call({ tool: i % 2 ? 'Read' : 'WebSearch', file_path: '/x', query: 'q' } as any)
-    expect((await band($))[0]).toMatch(/^非程式 推測 ○/)
+    for (let i = 0; i < 12; i++) await $.tool.call({ tool: i % 2 ? 'Read' : 'WebSearch', file_path: '/x', query: 'q' } as any)
+    expect((await band($))[0]).not.toMatch(/[●◉○]/)
   })
   test('store 放損壞資料：工具照常回結果、不 reject，band 仍能畫', async ($, on) => {
     const broken = { task: 'feature', stage: 'impl', stageSince: T0, updatedAt: T0, source: 'setstage', sessionId: 'old', badges: 'merge', milestone: 42, counts: 'x' }

@@ -56,17 +56,14 @@ export const PROJECT_OVERRIDES: Record<
   default: { labels: { feature: { ship: '部署', accept: '驗收' }, bugfix: { ship: '部署' } }, omit: { feature: ['submit'] } },
 }
 
-/** work 任務推斷：本 session 主迴圈至少這麼多次讀取類工具呼叫、且沒有其他訊號。 */
-export const WORK_MIN_READS = 8
-
 /**
  * 推斷任務的訊號強度（未宣告 task 時）。較強的訊號可以覆蓋較弱推斷出的任務；
  * 同為 strong 可跨任務切換；宣告（SetStage）的任務不被推斷覆蓋。
- * - reads：讀取門檻推出的 work
+ * work 不推斷，靠模型用 SetStage 宣告（數值保留 2／3，與舊 store 存的 taskRank 相容）。
  * - weak：寫程式檔（→ feature）、寫入 /specs/（→ feature）
- * - strong：ios-diagnose、systematic-debugging、gh issue（→ bugfix）、brainstorming（→ feature）；上個 session 宣告的任務也算 strong
+ * - strong：ios-diagnose、systematic-debugging、gh issue（→ bugfix）、brainstorming（→ feature）
  */
-export const TASK_SIGNAL_RANK = { reads: 1, weak: 2, strong: 3 } as const
+export const TASK_SIGNAL_RANK = { weak: 2, strong: 3 } as const
 
 /** 舊版（0.1）stage id 的對應：tf → ship、device → accept。 */
 export const LEGACY_STAGE_IDS: Readonly<Record<string, StageId>> = { tf: 'ship', device: 'accept' }

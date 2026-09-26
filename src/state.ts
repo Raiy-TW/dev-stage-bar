@@ -1,5 +1,5 @@
 // 持久化的任務／步驟狀態與其轉換（純函式）。每個 cwd 一份，存在 $.store。
-import { ALL_STAGE_IDS, BADGES, LEGACY_STAGE_IDS, TASKS, TASK_IDS, TASK_SIGNAL_RANK, WORK_MIN_READS, type BadgeId, type ProjectKind, type StageId, type TaskId } from './stages.ts'
+import { ALL_STAGE_IDS, BADGES, LEGACY_STAGE_IDS, TASKS, TASK_IDS, TASK_SIGNAL_RANK, type BadgeId, type ProjectKind, type StageId, type TaskId } from './stages.ts'
 import type { Classification } from './rules.ts'
 import { hasStage, isTaskId, stageIds, tasksWithStage } from './tasks.ts'
 
@@ -23,8 +23,6 @@ export type StageState = {
   locked?: boolean
   /** 本 session 已用 SetStage 宣告 task → 不再推斷任務。 */
   taskDeclared?: boolean
-  /** 主迴圈的讀取類／其他動作次數（推斷 work 用），只算 counts.sessionId 那個 session。 */
-  counts?: { sessionId: string; reads: number; others: number }
   handoff?: 'load' | 'save'
   badges?: BadgeId[]
   submitted?: boolean
@@ -80,30 +78,18 @@ function canSwitch(s: StageState, task: TaskId, rank: number, sessionId: string)
   return rank > cur || (rank === cur && rank === TASK_SIGNAL_RANK.strong)
 }
 
-/** 累加本 session 的讀取／其他計數；不算「更新」（不動 sessionId／updatedAt，避免「上次更新」被讀檔刷新）。 */
-function withCounts(s: StageState, c: Classification, sessionId: string): StageState {
-  if (!c.readOnly && !c.other) return s
-  const cur = s.counts?.sessionId === sessionId ? s.counts : { sessionId, reads: 0, others: 0 }
-  return { ...s, counts: { sessionId, reads: cur.reads + (c.readOnly ? 1 : 0), others: cur.others + (c.other ? 1 : 0) } }
-}
-
 const CHANGE_KEYS = ['task', 'taskSource', 'stage', 'source', 'locked', 'handoff', 'badges', 'submitted'] as const
 
 export function applyClassification(prev: StageState, c: Classification, now: number, sessionId: string, project: ProjectKind): StageState {
-  const counted = withCounts(prev, c, sessionId)
-  const base = forSession(counted, sessionId)
+  const base = forSession(prev, sessionId)
   let s = base
-  const reads = s.counts?.reads ?? 0
-  const others = s.counts?.others ?? 0
 
   // 任務推斷：依訊號強度（TASK_SIGNAL_RANK）決定能否切換。
   const candidate: { task: TaskId; rank: number } | undefined = c.task
     ? { task: c.task, rank: c.taskStrength === 'weak' ? TASK_SIGNAL_RANK.weak : TASK_SIGNAL_RANK.strong }
     : c.codeWrite
       ? { task: 'feature', rank: TASK_SIGNAL_RANK.weak }
-      : others === 0 && reads >= WORK_MIN_READS
-        ? { task: 'work', rank: TASK_SIGNAL_RANK.reads }
-        : undefined
+      : undefined
   if (candidate && canSwitch(s, candidate.task, candidate.rank, sessionId)) s = withTask(s, candidate.task, 'inferred', now, candidate.rank)
 
   // 步驟：依目前任務查表，查不到就不改。
@@ -118,7 +104,7 @@ export function applyClassification(prev: StageState, c: Classification, now: nu
   if (c.submitted && s.stage === 'submit' && !s.submitted) s = { ...s, submitted: true }
 
   const changed = CHANGE_KEYS.some(k => s[k] !== base[k])
-  return changed ? { ...s, updatedAt: now } : counted
+  return changed ? { ...s, updatedAt: now } : prev
 }
 
 /** 驗證 SetStage 的輸入：決定任務、確認 stage 屬於該任務；不合法時回錯誤字串（不改狀態）。 */
@@ -199,10 +185,6 @@ export function migrateState(v: unknown): StageState {
   if (Array.isArray(raw.badges)) {
     const badges = raw.badges.filter((b): b is BadgeId => (BADGES as readonly unknown[]).includes(b))
     if (badges.length) s.badges = badges
-  }
-  const c = raw.counts as Record<string, unknown> | null | undefined
-  if (typeof c === 'object' && c !== null && str(c.sessionId) && num(c.reads) !== undefined && num(c.others) !== undefined) {
-    s.counts = { sessionId: c.sessionId as string, reads: c.reads as number, others: c.others as number }
   }
   return s
 }

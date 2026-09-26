@@ -29,9 +29,7 @@ export type Classification = {
   task?: TaskId
   /** 任務訊號強度（見 stages.ts 的 TASK_SIGNAL_RANK）。 */
   taskStrength?: 'strong' | 'weak'
-  /** 主迴圈的讀取類呼叫（Read/Grep/…、唯讀 Bash、寫 .md）：累積到門檻推斷 work。 */
-  readOnly?: boolean
-  /** 主迴圈的其他動作（非唯讀 Bash、寫程式檔、Agent…）：出現就不推斷 work。 */
+  /** 主迴圈的動作（非唯讀 Bash、寫檔、Agent…）；讀取類與中性工具沒有這個標記。 */
   other?: boolean
   /** 寫了程式檔（非 .md）：任務仍未判定時預設 feature。 */
   codeWrite?: boolean
@@ -125,12 +123,8 @@ export function classify(e: ToolEvent): Classification {
         c.task = 'feature'
         c.taskStrength = 'weak'
       }
-      const isDoc = /\.md$/i.test(path)
-      if (!isDoc) c.codeWrite = true
-      if (main) {
-        if (isDoc) c.readOnly = true
-        else c.other = true
-      }
+      if (!/\.md$/i.test(path)) c.codeWrite = true
+      if (main) c.other = true
       break
     }
     case 'Agent': {
@@ -157,8 +151,7 @@ export function classify(e: ToolEvent): Classification {
           c.task = 'bugfix'
           c.taskStrength = 'strong'
         }
-        if (isReadOnlyBash(cmd)) c.readOnly = true
-        else c.other = true
+        if (!isReadOnlyBash(cmd)) c.other = true
       }
       if (RE.mutation.test(cmd)) c.badge = 'mutation'
       else if (RE.merge.test(cmd)) c.badge = 'merge'
@@ -170,8 +163,7 @@ export function classify(e: ToolEvent): Classification {
       if (main) c.other = true
       break
     default:
-      if (main && READ_TOOLS.has(e.tool)) c.readOnly = true
-      else if (main && !NEUTRAL_TOOLS.has(e.tool) && !e.tool.startsWith('mcp__')) c.other = true
+      if (main && !READ_TOOLS.has(e.tool) && !NEUTRAL_TOOLS.has(e.tool) && !e.tool.startsWith('mcp__')) c.other = true
   }
   return c
 }

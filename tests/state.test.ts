@@ -1,6 +1,6 @@
 import { test, expect, describe } from 'claude-code/testing'
 import { emptyState, applyClassification, applySetStage, isLocked, resolveSetStage, migrateState, type StageState } from '../src/state.ts'
-import { TASK_SIGNAL_RANK, WORK_MIN_READS } from '../src/stages.ts'
+import { TASK_SIGNAL_RANK } from '../src/stages.ts'
 
 const S1 = 'session-1'
 const S2 = 'session-2'
@@ -75,31 +75,15 @@ describe('任務推斷', () => {
     expect(s.task).toBe('work')
     expect(s.stage).toBe('clarify')
   })
-  test(`work：主迴圈 ${WORK_MIN_READS} 次讀取類呼叫、沒有其他訊號 → work`, async () => {
+  test('讀取類呼叫再多也不推斷任務（work 靠模型宣告）', async () => {
     let s = emptyState()
-    for (let i = 0; i < WORK_MIN_READS - 1; i++) s = applyClassification(s, { readOnly: true }, 1000 + i, S1, 'default')
-    expect(s.task).toBeUndefined()
-    s = applyClassification(s, { readOnly: true }, 2000, S1, 'default')
-    expect(s.task).toBe('work')
-    expect(s.taskSource).toBe('inferred')
-  })
-  test('work 反例：中間有其他動作（非唯讀 Bash、Agent）就不判定 work', async () => {
-    let s = applyClassification(emptyState(), { other: true }, 999, S1, 'default')
-    for (let i = 0; i < WORK_MIN_READS + 2; i++) s = applyClassification(s, { readOnly: true }, 1000 + i, S1, 'default')
+    for (let i = 0; i < 20; i++) s = applyClassification(s, {}, 1000 + i, S1, 'default')
     expect(s.task).toBeUndefined()
   })
   test('寫程式檔且仍未判定 → feature', async () => {
     const s = applyClassification(emptyState(), { codeWrite: true, other: true }, 1000, S1, 'default')
     expect(s.task).toBe('feature')
     expect(s.taskSource).toBe('inferred')
-  })
-  test('先 8 次讀取被推成 work，之後寫程式檔 → 升級為 feature', async () => {
-    let w = emptyState()
-    for (let i = 0; i < WORK_MIN_READS; i++) w = applyClassification(w, { readOnly: true }, 1000 + i, S1, 'default')
-    expect(w.task).toBe('work')
-    w = applyClassification(w, { codeWrite: true, other: true }, 3000, S1, 'default')
-    expect(w.task).toBe('feature')
-    expect(w.taskSource).toBe('inferred')
   })
   test('宣告的 work 不因寫程式檔改變', async () => {
     let w = applySetStage(emptyState(), { task: 'work', stage: 'produce' }, 1000, S1)
@@ -119,8 +103,8 @@ describe('任務推斷', () => {
     s = applyClassification(s, { task: 'feature', taskStrength: 'strong' }, 2000, S1, 'ios')
     expect(s.task).toBe('feature')
   })
-  test('TASK_SIGNAL_RANK 優先序：讀取門檻 < 弱訊號 < 明確訊號', async () => {
-    expect(TASK_SIGNAL_RANK.reads).toBeLessThan(TASK_SIGNAL_RANK.weak)
+  test('TASK_SIGNAL_RANK 優先序：弱訊號 < 明確訊號；沒有讀取門檻', async () => {
+    expect('reads' in TASK_SIGNAL_RANK).toBe(false)
     expect(TASK_SIGNAL_RANK.weak).toBeLessThan(TASK_SIGNAL_RANK.strong)
   })
   test('推斷換任務時重設步驟與 badge', async () => {
@@ -229,6 +213,10 @@ describe('舊 store 資料相容', () => {
     expect(bad.updatedAt).toBe(0)
     expect(bad.source).toBe('none')
     expect(bad.badges).toEqual(['merge'])
+  })
+  test('舊版的 counts（讀取計數）不再保留', async () => {
+    const s = migrateState({ task: 'work', stage: 'research', stageSince: 1, updatedAt: 2, source: 'guess', counts: { sessionId: 'x', reads: 9, others: 0 } })
+    expect('counts' in s).toBe(false)
   })
   test('壞資料 → 空狀態', async () => {
     expect(migrateState(undefined)).toEqual(emptyState())

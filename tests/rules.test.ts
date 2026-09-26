@@ -149,34 +149,29 @@ describe('任務訊號', () => {
     expect(classify({ tool: 'Write', file_path: '/p/docs/specs/a.md' }).task).toBe('feature')
     expect(classify({ tool: 'Skill', skill: 'superpowers:writing-plans' }).task).toBeUndefined()
   })
-  test('讀取類：Read/Grep/Glob/WebFetch/WebSearch/ToolSearch、唯讀 Bash、寫 .md', async () => {
-    for (const tool of ['Read', 'Grep', 'Glob', 'WebFetch', 'WebSearch', 'ToolSearch']) expect(classify({ tool }).readOnly).toBe(true)
-    for (const command of ['ls -la', 'git status', 'cat a | head -3', 'rg foo src', 'git log --oneline']) expect(classify({ tool: 'Bash', command }).readOnly).toBe(true)
-    expect(classify({ tool: 'Write', file_path: '/p/notes.md' }).readOnly).toBe(true)
-    expect(classify({ tool: 'Edit', file_path: '/p/README.md' }).readOnly).toBe(true)
+  test('讀取類不算動作：Read/Grep/Glob/WebFetch/WebSearch/ToolSearch、唯讀 Bash', async () => {
+    for (const tool of ['Read', 'Grep', 'Glob', 'WebFetch', 'WebSearch', 'ToolSearch']) expect(classify({ tool }).other).toBeFalsy()
+    for (const command of ['ls -la', 'git status', 'cat a | head -3', 'rg foo src', 'git log --oneline']) expect(classify({ tool: 'Bash', command }).other).toBeFalsy()
   })
-  test('其他動作：非唯讀 Bash、寫程式檔、Agent', async () => {
-    for (const command of ['npm test', 'rm x', 'echo hi > f.txt', 'git commit -m x']) {
-      const c = classify({ tool: 'Bash', command })
-      expect(c.readOnly).toBeFalsy()
-      expect(c.other).toBe(true)
-    }
+  test('其他動作：非唯讀 Bash、寫程式檔、寫 .md、Agent', async () => {
+    for (const command of ['npm test', 'rm x', 'echo hi > f.txt', 'git commit -m x']) expect(classify({ tool: 'Bash', command }).other).toBe(true)
     const w = classify({ tool: 'Edit', file_path: '/p/src/App.swift' })
     expect(w.codeWrite).toBe(true)
     expect(w.other).toBe(true)
+    // 寫文件也是產出，不是問答。
+    for (const file_path of ['/p/notes.md', '/p/README.md']) {
+      const d = classify({ tool: 'Write', file_path })
+      expect(d.other).toBe(true)
+      expect(d.codeWrite).toBeFalsy()
+    }
     expect(classify({ tool: 'Agent', description: 'Explore x' }).other).toBe(true)
   })
-  test('subagent 內的呼叫不計入讀取／其他（只算主迴圈）', async () => {
-    const c = classify({ tool: 'Read', agentId: 'a1' })
-    expect(c.readOnly).toBeFalsy()
+  test('subagent 內的呼叫不算主迴圈動作', async () => {
     expect(classify({ tool: 'Bash', command: 'npm test', agentId: 'a1' }).other).toBeFalsy()
+    expect(classify({ tool: 'Write', file_path: '/p/a.md', agentId: 'a1' }).other).toBeFalsy()
   })
-  test('中性工具（AskUserQuestion、TodoWrite、Skill 無訊號）不算讀取也不算其他', async () => {
-    for (const e of [{ tool: 'AskUserQuestion' }, { tool: 'TodoWrite' }, { tool: 'Skill', skill: 'humanizer-zh-tw' }]) {
-      const c = classify(e)
-      expect(c.readOnly).toBeFalsy()
-      expect(c.other).toBeFalsy()
-    }
+  test('中性工具（AskUserQuestion、TodoWrite、Skill 無訊號）不算動作', async () => {
+    for (const e of [{ tool: 'AskUserQuestion' }, { tool: 'TodoWrite' }, { tool: 'Skill', skill: 'humanizer-zh-tw' }]) expect(classify(e).other).toBeFalsy()
   })
 })
 
