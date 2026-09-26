@@ -82,21 +82,25 @@ mod 在每個專案都註冊工具 `mcp__dev-stage-bar__SetStage({ task?, stage,
 
 **使用者的 prompt**（純本地關鍵字比對，不呼叫模型、不花 token）：
 
-只看你自己送出的 prompt（Enter 或 Remote Control），通知、其他 session、排程送來的不算。只有在**沒有現在的任務**時才會設定任務（以「推測」顯示、不鎖步驟）；已經在做的任務不會被下一句話的關鍵字換掉，本 session 用 SetStage 宣告的任務即使過期也不會。
+只看你自己送出的 prompt（Enter 或 Remote Control），通知、其他 session、SDK、排程送來的不算；turn 進行中打的 prompt 等它自己的 turn 開始才算。只有在**沒有現在的任務**時才會設定任務（以「推測」顯示、不鎖步驟）；已經在做的任務不會被下一句話的關鍵字換掉，本 session 用 SetStage 宣告的任務即使過期也不會。
 
-| 命中 | 結果 |
-|---|---|
-| 修、bug、壞、錯誤、閃退、crash、卡住、報錯、error、fix、失敗、不會動、debug | 修bug · 重現 |
-| 新增、加上、加一個、做一個、實作、優化、改成、implement、add、build | 新功能 · 需求 |
-| 研究、調查、規劃、整理、文件、報告、比較、research、plan、docs | 非程式 · 釐清 |
-| 沒命中上面任何一列，且以 ?／？ 結尾或含 嗎、呢、為什麼、什麼、怎麼、如何、是不是、會不會、有沒有、能不能、差別、解釋、why、what、how | 問答：送出當下就顯示「問答中」／「討論中」 |
-| 以 `/` 開頭、整句是 繼續／好／ok／push／commit／存檔／save 等接續語，或去掉標點後不超過 2 個字 | 不判斷 |
+只看第一行（先拿掉 ``` code block）的前 120 字，依序判斷，先中先贏：
 
-- 同時命中多列時取表中較上面的一列：bug 與 feature 都命中 → 修bug；feature 與 work → 新功能。
-- 有動作關鍵字的問句算動作（「為什麼會閃退？」→ 修bug）。
-- 中文關鍵字以子字串比對，英文以單字邊界、不分大小寫比對（address 不是 add、debugger 不是 bug）。比對前先把「修改」換成「改」、「修飾」換成「飾」，避免被當成修 bug。
-- 例：「幫我優化 dev-stage-bar 他會莫名卡在某個階段」→ 新功能（「優化」命中，「卡在」不是關鍵字）；「用 haiku 讀 prompt 判斷任務 這個會很消耗token嗎？」→ 問答。
-- 要改關鍵字、優先序、接續語，只改 `src/stages.ts` 的 `PROMPT_INTENT`（`rules` 的順序就是優先序）。
+| 順序 | 條件 | 結果 |
+|---|---|---|
+| 0 | 第一個詞是 slash command（`/save`、`/codex:rescue`；路徑 `/Users/…` 不算）、整句是接續語（繼續、好、ok、push、commit、存檔、save…）、或去掉標點後不超過 2 字 | 不判斷 |
+| 1 | 症狀詞：閃退、crash、報錯、不會動、卡住、壞掉、壞了、當掉、當機、exception | 修bug · 重現（問句裡也算） |
+| 2 | 問句：以 ?／？ 結尾，或含 嗎、呢、為什麼、什麼、怎麼、如何、是不是、會不會、有沒有、能不能、差別、解釋、哪、why、what、how、which | 問答：送出當下就顯示「問答中」／「討論中」 |
+| 3 | 功能詞（新增、加上、加一個、做一個、實作、優化、改成、implement、add）＋祈使 | 新功能 · 需求 |
+| 4 | 通用 bug 詞：錯誤、失敗、修好、修掉、修復、幫我修、error、fail、fix、bug、debug | 修bug · 重現 |
+| 5 | 工作詞（研究、調查、規劃、整理、文件、報告、比較一下、做比較、對照、research、plan、docs）＋祈使 | 非程式 · 釐清 |
+
+- 祈使：含 幫我、幫忙、請、把、給我、麻煩、我要、我想要、please、let's、can you、could you、i want、i need，或句首就是功能／工作詞（「新增一個…」「整理…」「adding a toggle…」）。
+- 所以：「這段是怎麼實作的？」「錯誤處理要怎麼設計？」是問答；「為什麼會閃退？」是修bug；「幫我新增錯誤處理」「加上 error log」是新功能；「上傳一直失敗」是修bug；「首頁如果改成兩欄會比較好」「幫我 build 一下看看」不判斷。
+- 單獨的「修」不算：「修一下文案」「修訂 README」不判斷；要「修好／修掉／修復／幫我修」。比對前先把「修改」換成「改」、「修訂」換成「訂」、「修飾」換成「飾」。
+- 中文關鍵字以子字串比對；英文以單字邊界、不分大小寫，容許 s／es／ed／ing 字尾（crashes、failing、bugs；address 不是 add、planet 不是 plan、debugger 不是 debug）。
+- 例：「幫我優化 dev-stage-bar 他會莫名卡在某個階段」→ 新功能（「卡在」不是症狀詞）；「用 haiku 讀 prompt 判斷任務 這個會很消耗token嗎？」→ 問答。
+- 要改關鍵字、祈使詞、接續語、字數上限，只改 `src/stages.ts` 的 `PROMPT_INTENT`；判斷順序寫在同一處的註解與 `src/intent.ts`。
 
 **步驟**（依目前任務查表，查不到就不改）：
 
