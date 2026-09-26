@@ -6,7 +6,7 @@ import { ALL_STAGE_IDS, TASKS, TASK_IDS, THRESHOLDS, TICK_MS, type ProjectKind }
 import { stageIds, stagesFor } from '../src/tasks.ts'
 import { agentShortName, callLabel, classify, type ToolEvent } from '../src/rules.ts'
 import { classifyPrompt } from '../src/intent.ts'
-import { applyClassification, applyPromptIntent, applySetStage, emptyState, migrateState, resolveSetStage, type StageState } from '../src/state.ts'
+import { applyClassification, applyPromptIntent, applySetStage, isFresh, emptyState, migrateState, resolveSetStage, type StageState } from '../src/state.ts'
 import { renderLines, lineText, type Activity, type AgentRow, type InFlight, type Line, type Thresholds } from '../src/format.ts'
 
 const SET_STAGE = 'SetStage'
@@ -39,6 +39,10 @@ let turnActed = false
 let lastTurn: 'chat' | 'acted' | undefined
 /** 進行中的 turn 是接續 turn（背景 subagent 完成後引擎自己開的，text 為空）。 */
 let continuation = false
+/** turn 進行中打的使用者 prompt：會排成自己的 turn，等那個 turn 開始（turn.start 帶同一段文字）才套用。 */
+let pendingPrompt: string | undefined
+/** 閒置時送出、已套用的最後一句使用者 prompt（/clear 後 turn.start 換了 session id 時重新套用）。 */
+let lastPrompt: string | undefined
 let lastEventAt: number | null = null
 let lastSignature = ''
 const lastEventByOwner: Record<string, number> = {}
@@ -192,17 +196,20 @@ function onSetStage(e: Record<string, unknown>): string {
   return `已設為 ${TASKS[resolved.task].label} · ${label}（${resolved.stage}）${input.detail ? ` · ${input.detail}` : ''}${input.milestone ? ` · ${input.milestone}` : ''}`
 }
 
-/** midTurn：prompt 是在 turn 進行中打的（會送進那個 turn），不抹掉那個 turn 已有的動作。 */
-function onPrompt(text: string, midTurn: boolean): void {
+/** 套用使用者 prompt 的意圖（閒置時送出當下；turn 進行中打的等它自己的 turn.start）。 */
+function onPrompt(text: string): void {
   const intent = classifyPrompt(text)
   if (intent === 'chat') {
     // 問答：送出當下就顯示（不等 turn.complete）；這個 turn 若有動作，既有邏輯接手。
     lastTurn = 'chat'
-    if (!midTurn) turnActed = false
+    turnActed = false
   } else if (intent) {
-    // 要求動手：上一輪的「討論中」不再適用。
-    lastTurn = undefined
-    persist(applyPromptIntent(state, intent, nowSync(), sessionId, project))
+    const now = nowSync()
+    const updated = applyPromptIntent(state, intent, now, sessionId, project)
+    // 要求動手：任務因此改變、或已有現在的任務時，上一輪的「討論中」不再適用。
+    // 任務沒變且沒有現在的任務（例如本 session 宣告的任務已過期）時不動，免得變成「問答中」。
+    if (updated !== state || isFresh(state, sessionId, now, th.staleAfterMin)) lastTurn = undefined
+    persist(updated)
   }
 }
 
@@ -279,12 +286,28 @@ export const register: Register = on => {
     // 沒有使用者文字的接續 turn 延續上一個 turn 的判定，不重設。
     continuation = e.text === ''
     if (!continuation) turnActed = false
+    let sessionChanged = false
     try {
       // /clear 不會重跑 session.start，但 session id 會換：換了就讓 session 範圍的鎖／badge／接手標記失效。
       const id = await $.session.id()
-      if (id && id !== sessionId) sessionId = id
+      if (id && id !== sessionId) {
+        sessionId = id
+        sessionChanged = true
+      }
     } catch {
       // 只影響顯示。
+    }
+    if (!continuation) {
+      // 排隊的使用者 prompt 輪到了：現在才套用；先開始的是別的 turn 就丟掉。
+      // /clear 後的第一句在 prompt.submit 時還是舊 session id：換了 id 就用新 id 再套用一次。
+      const queued = pendingPrompt ?? (sessionChanged ? lastPrompt : undefined)
+      pendingPrompt = undefined
+      lastPrompt = undefined
+      try {
+        if (queued !== undefined && queued.trim() === e.text.trim()) onPrompt(queued)
+      } catch {
+        // 只影響顯示。
+      }
     }
     invalidateIfChanged($, nowSync())
     return r
@@ -293,7 +316,13 @@ export const register: Register = on => {
   // 使用者的 prompt：純本地關鍵字判斷意圖（不呼叫模型）。原樣放行，判斷在 next 之前同步做完、不 await 任何 $。
   on('prompt.submit', ($, e, next) => {
     try {
-      if (enabled && PERSON_ORIGINS.has(e.origin?.kind ?? '')) onPrompt(e.text, e.turnId !== undefined)
+      if (enabled && PERSON_ORIGINS.has(e.origin?.kind ?? '')) {
+        if (e.turnId !== undefined) pendingPrompt = e.text
+        else {
+          onPrompt(e.text)
+          lastPrompt = e.text
+        }
+      }
       invalidateIfChanged($, nowSync())
     } catch {
       // 只影響顯示。
