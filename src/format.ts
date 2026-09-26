@@ -1,7 +1,7 @@
 // 狀態判定與兩行排版（純函式，無 $）：輸出 segment 陣列，由 hooks/index.ts 轉成 Box/Text。
 import { COLORS, GLYPHS, NARROW_COLUMNS, SAFETY_MARGIN, TASKS, WAITING_STAGES, type ProjectKind, type THRESHOLDS } from './stages.ts'
 import { stagesFor, type StageDef } from './tasks.ts'
-import type { StageState } from './state.ts'
+import { isFresh, type StageState } from './state.ts'
 import { displayWidth, truncateToWidth } from './width.ts'
 
 export type Thresholds = { readonly [K in keyof typeof THRESHOLDS]: number }
@@ -39,6 +39,7 @@ export type Status = { kind: StatusKind; text: string }
 const MIN = 60_000
 const PENDING_TEXT = '判斷任務中…'
 const INFERRED_MARK = '推測'
+const LAST_MARK = '上次：'
 const MAIN = 'main'
 const ASK_TOOL = 'AskUserQuestion'
 
@@ -65,7 +66,8 @@ function ownerName(owner: string, act: Activity): string {
   return act.agents.find(a => a.id === owner)?.short ?? 'subagent'
 }
 
-export function evaluateStatus(state: StageState, act: Activity, th: Thresholds): Status {
+/** fresh=false（任務／步驟只是「上次」的）時，不依步驟顯示「等你：驗收」「排審中」。 */
+export function evaluateStatus(state: StageState, act: Activity, th: Thresholds, fresh = true): Status {
   const { now } = act
   const asking = act.calls.some(c => c.tool === ASK_TOOL)
   const permission = act.calls.find(c => c.awaitingPermission)
@@ -90,8 +92,8 @@ export function evaluateStatus(state: StageState, act: Activity, th: Thresholds)
   }
   if (asking) return { kind: 'waiting', text: '⏸ 等你：回答問題' }
   if (permission) return { kind: 'waiting', text: `⏸ 等你：授權 ${permission.label}` }
-  if (state.stage && WAITING_STAGES.includes(state.stage)) return { kind: 'waiting', text: '⏸ 等你：驗收' }
-  if (state.stage === 'submit' && state.submitted) return { kind: 'waiting', text: '⏸ 排審中' }
+  if (fresh && state.stage && WAITING_STAGES.includes(state.stage)) return { kind: 'waiting', text: '⏸ 等你：驗收' }
+  if (fresh && state.stage === 'submit' && state.submitted) return { kind: 'waiting', text: '⏸ 排審中' }
   if (act.calls.length > 0 || act.agents.length > 0 || (act.lastEventAt !== null && now - act.lastEventAt <= th.activeMin * MIN)) {
     return { kind: 'running', text: '🔄' }
   }
@@ -109,9 +111,14 @@ function stageIndex(state: StageState, stages: readonly StageDef[]): number {
   return state.stage ? stages.findIndex(s => s.id === state.stage) : -1
 }
 
-function staleText(state: StageState, sessionId: string, now: number): string | undefined {
-  if (!state.sessionId || state.sessionId === sessionId || !state.updatedAt) return undefined
-  return `上次更新 ${fmtAgo(now - state.updatedAt)}`
+/** 「上次：新功能 · TF · 17 小時前」：沒有步驟時省略步驟段，沒有時間時省略「多久前」。 */
+function lastText(state: StageState, project: ProjectKind, now: number): string {
+  if (!state.task) return ''
+  const stages = stagesOf(state, project)
+  const idx = stageIndex(state, stages)
+  const at = state.stageAt ?? state.updatedAt
+  const parts = [TASKS[state.task].label, idx >= 0 ? stages[idx]!.label : undefined, at ? fmtAgo(now - at) : undefined]
+  return LAST_MARK + parts.filter((p): p is string => !!p).join(' · ')
 }
 
 const width = (line: Line): number => line.reduce((w, s) => w + displayWidth(s.text), 0)
@@ -143,15 +150,12 @@ function taskPrefix(state: StageState): Line {
   return [{ text: label, color: COLORS.current }, { text: ' ' }]
 }
 
-/** 「驗證 · T3/5 · 12m」與（上個 session 的狀態時）「· 上次更新 3 小時前」；沒有步驟時為空。 */
-function stageLabel(state: StageState, stages: readonly StageDef[], now: number, sessionId: string): Line {
+/** 「驗證 · T3/5 · 12m」；沒有步驟時為空。 */
+function stageLabel(state: StageState, stages: readonly StageDef[], now: number): Line {
   const idx = stageIndex(state, stages)
   if (idx < 0) return []
   const parts = [state.detail, fmtDuration(now - state.stageSince)].filter((p): p is string => !!p)
-  const line: Line = [{ text: stages[idx]!.label, color: COLORS.current, bold: true }, { text: ` · ${parts.join(' · ')}` }]
-  const stale = staleText(state, sessionId, now)
-  if (stale) line.push({ text: ` · ${stale}`, dim: true })
-  return line
+  return [{ text: stages[idx]!.label, color: COLORS.current, bold: true }, { text: ` · ${parts.join(' · ')}` }]
 }
 
 const MILESTONE_GAP = '   '
@@ -193,29 +197,31 @@ function alignUnder(label: Line, x: number, columns: number): Line {
   return start > 0 ? [{ text: ' '.repeat(start) }, ...fitted] : fitted
 }
 
-/** 尚未判定任務：一行 dim 的「判斷任務中…」。 */
-const pendingLine = (columns: number): Line => fitLine([{ text: PENDING_TEXT, dim: true }], columns)
+/** 沒有 fresh 任務：一行 dim。有舊任務時畫「上次：…」，否則「判斷任務中…」。 */
+function notNowLine(state: StageState, project: ProjectKind, now: number, columns: number): Line {
+  return fitLine([{ text: state.task ? lastText(state, project, now) : PENDING_TEXT, dim: true }], columns)
+}
 
 /** 窄版單行：修bug ●◉○○○○○ 診斷 · 12m */
-function compactLine(state: StageState, project: ProjectKind, now: number, sessionId: string, columns: number): Line {
-  if (!state.task) return pendingLine(columns)
+function compactLine(state: StageState, project: ProjectKind, now: number, fresh: boolean, columns: number): Line {
+  if (!fresh) return notNowLine(state, project, now, columns)
   const stages = stagesOf(state, project)
   const idx = stageIndex(state, stages)
   const line: Line = [...taskPrefix(state), ...stages.map((_, i) => dotSeg(i, idx))]
-  const label = stageLabel(state, stages, now, sessionId)
+  const label = stageLabel(state, stages, now)
   if (label.length) line.push({ text: ' ' }, ...label)
   return fitLine(line, columns)
 }
 
 /** 第 1、2 行（第 2 行可能為空）；窄到點距不足時為單行。 */
-function progressLines(state: StageState, project: ProjectKind, now: number, sessionId: string, columns: number): { bar: Line; label?: Line } {
-  if (!state.task) return { bar: pendingLine(columns) }
+function progressLines(state: StageState, project: ProjectKind, now: number, fresh: boolean, columns: number): { bar: Line; label?: Line } {
+  if (!fresh) return { bar: notNowLine(state, project, now, columns) }
   const stages = stagesOf(state, project)
   const prefix = taskPrefix(state)
   const gap = dotGap(state, stages.length, width(prefix), columns)
-  if (columns < NARROW_COLUMNS || gap < 1) return { bar: compactLine(state, project, now, sessionId, columns) }
+  if (columns < NARROW_COLUMNS || gap < 1) return { bar: compactLine(state, project, now, fresh, columns) }
   const { line, xs } = dotsLine(state, stages, prefix, gap)
-  const label = stageLabel(state, stages, now, sessionId)
+  const label = stageLabel(state, stages, now)
   const idx = stageIndex(state, stages)
   return { bar: fitLine(line, columns), ...(label.length ? { label: alignUnder(label, xs[idx]!, columns) } : {}) }
 }
@@ -268,10 +274,11 @@ function activityLine(state: StageState, act: Activity, st: Status, sessionId: s
 export type LayoutOptions = { sessionId: string; columns: number; maxRows: number; th: Thresholds; project: ProjectKind }
 
 export function renderLines(state: StageState, act: Activity, o: LayoutOptions): Line[] {
+  const fresh = isFresh(state, o.sessionId, act.now, o.th.staleAfterMin)
   // 只有一列可用：窄版單行（點＋階段文字）。
-  if (o.maxRows < 2) return [compactLine(state, o.project, act.now, o.sessionId, o.columns)]
-  const { bar, label } = progressLines(state, o.project, act.now, o.sessionId, o.columns)
-  const activity = activityLine(state, act, evaluateStatus(state, act, o.th), o.sessionId, o.columns, o.th)
+  if (o.maxRows < 2) return [compactLine(state, o.project, act.now, fresh, o.columns)]
+  const { bar, label } = progressLines(state, o.project, act.now, fresh, o.columns)
+  const activity = activityLine(state, act, evaluateStatus(state, act, o.th, fresh), o.sessionId, o.columns, o.th)
   const lines: Line[] = [bar]
   if (o.maxRows >= 3 || !label || !activity) {
     if (label) lines.push(label)
@@ -279,7 +286,7 @@ export function renderLines(state: StageState, act: Activity, o: LayoutOptions):
     return lines.slice(0, Math.max(1, o.maxRows))
   }
   // 只有兩列：把階段文字併進活動列開頭。
-  const merged = [...stageLabel(state, stagesOf(state, o.project), act.now, o.sessionId), { text: ' · ' }, ...activity]
+  const merged = [...stageLabel(state, stagesOf(state, o.project), act.now), { text: ' · ' }, ...activity]
   lines.push(fitLine(merged, o.columns))
   return lines
 }

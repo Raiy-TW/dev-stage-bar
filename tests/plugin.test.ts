@@ -179,10 +179,8 @@ describe('階段判斷（經由 hooks）', () => {
     expect((await band($))[1]).toMatch(/驗證 · \d+m/)
   })
   test('subagent 內的 xcodebuild test 不改階段', async ($, on) => {
-    await boot($, on, {
-      agents: [{ id: 'a1', description: 'M48 T3 add parser', type: 'general-purpose', status: 'running' }],
-      store: { [`stage:${CWD}`]: { task: 'bugfix', stage: 'fix', stageSince: T0, updatedAt: T0, source: 'setstage', sessionId: 'old' } },
-    })
+    await boot($, on, { agents: [{ id: 'a1', description: 'M48 T3 add parser', type: 'general-purpose', status: 'running' }] })
+    await $.tool.call({ tool: TOOL, task: 'bugfix', stage: 'fix' } as any)
     await $.tool.call({ tool: 'Bash', command: 'xcodebuild test -scheme A', agentId: 'a1' } as any)
     expect((await band($))[1]).toMatch(/修正 · /)
   })
@@ -206,7 +204,7 @@ describe('階段判斷（經由 hooks）', () => {
       expect(r.result).toBe(`bottom:${e.tool}`)
     }
     const rows = await band($)
-    expect(rows[0]).toMatch(/^新功能 /)
+    expect(rows[0]).toContain('新功能')
   })
   test('顯示路徑出錯（ui.invalidate 失敗）時工具仍回結果、不 reject', async ($, on) => {
     on('ui.invalidate', () => {
@@ -222,12 +220,36 @@ describe('階段判斷（經由 hooks）', () => {
   })
   test('舊版 store 的 tf 映射成 ship（ios 顯示 TF）', async ($, on) => {
     await boot($, on, { store: { [`stage:${CWD}`]: { stage: 'tf', stageSince: T0, updatedAt: T0, source: 'setstage', sessionId: 'old' } } })
-    expect((await band($))[1]).toMatch(/TF · /)
+    expect((await band($))[0]).toContain('上次：新功能 · TF')
   })
-  test('上次 session 的階段顯示「上次更新」', async ($, on) => {
-    const saved = { stage: 'impl', stageSince: T0 - 5 * 60 * MIN, updatedAt: T0 - 3 * 60 * MIN, source: 'setstage', sessionId: 'old' }
-    await boot($, on, { store: { [`stage:${CWD}`]: saved } })
-    expect((await band($))[1]).toContain('上次更新 3 小時前')
+})
+
+describe('新鮮度（截圖：舊推測被新 session 的 badge 洗白）', () => {
+  const SCREENSHOT = { task: 'feature', taskSource: 'inferred', taskRank: 2, stage: 'ship', stageSince: T0 - 18 * 60 * MIN, updatedAt: T0 - 17 * 60 * MIN - 26 * MIN, source: 'guess', sessionId: 'old' }
+  test('(a) 舊 session 推測 feature/ship，新 session 只跑 mutate.sh → dim「上次」行，不是點線；badge 照舊', async ($, on) => {
+    await boot($, on, { store: { [`stage:${CWD}`]: SCREENSHOT } })
+    await $.tool.call({ tool: 'Bash', command: 'scripts/mutate.sh src/a.ts' } as any)
+    const rows = await band($)
+    expect(rows[0]).not.toMatch(/[●◉○]/)
+    expect(rows[0]).toContain('上次：新功能 · TF · 17 小時前')
+    expect(rows.join('\n')).toContain('[mutation]')
+    expect(rows.join('\n')).not.toContain('TF · 17h')
+  })
+  test('(b) 同一 session，SetStage 後 121 分鐘沒有步驟事件 → 「上次」', async ($, on) => {
+    const { clock } = await boot($, on)
+    await $.tool.call({ tool: TOOL, task: 'feature', stage: 'impl' } as any)
+    expect((await band($))[0]).toMatch(/^新功能 ●/)
+    await clock.advance(121 * MIN)
+    const rows = await band($)
+    expect(rows[0]).not.toMatch(/[●◉○]/)
+    expect(rows[0]).toContain('上次：新功能 · 實作 · 2 小時前')
+  })
+  test('(c) 舊 store 之後新 session SetStage → 正常點亮', async ($, on) => {
+    await boot($, on, { store: { [`stage:${CWD}`]: SCREENSHOT } })
+    await $.tool.call({ tool: TOOL, task: 'bugfix', stage: 'diagnose' } as any)
+    const rows = await band($)
+    expect(rows[0]).toMatch(/^修bug ●━+◉/)
+    expect(rows[1]?.trim()).toBe('診斷 · 0m')
   })
 })
 

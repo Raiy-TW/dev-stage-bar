@@ -165,7 +165,7 @@ describe('點線進度條', () => {
   })
 
   test('有任務但尚未進入步驟：任務名＋全部 ○ 與 ┄，不畫第 2 行', async () => {
-    const s0 = applyClassification(emptyState(), { codeWrite: true, other: true }, T0, S, 'default')
+    const s0 = applyClassification(emptyState(), { task: 'feature', taskStrength: 'weak' }, T0, S, 'default')
     const lines = renderLines(s0, act(), { ...opts(160), project: 'default' })
     expect(lines).toHaveLength(1)
     const t = lineText(lines[0]!)
@@ -193,10 +193,31 @@ describe('點線進度條', () => {
     expect(line[0]!.dim).toBe(true)
   })
 
-  test('上個 session 的狀態在第 2 行附「上次更新 X 小時前」', async () => {
-    const old = applySetStage(emptyState(), { task: 'feature', stage: 'impl' }, T0 - 3 * 60 * MIN, 'old')
-    expect(lineText(renderLines(old, act(), opts(160))[1]!)).toContain('實作 · 3h0m · 上次更新 3 小時前')
-    expect(lineText(renderLines(old, act(), { ...opts(160), sessionId: 'old' })[1]!)).not.toContain('上次更新')
+  test('不 fresh（上個 session）：不畫點線，只畫一行 dim「上次：任務 · 步驟 · X 前」', async () => {
+    const old = applySetStage(emptyState(), { task: 'feature', stage: 'ship' }, T0 - 17 * 60 * MIN, 'old')
+    for (const cols of [160, 38]) {
+      const lines = renderLines(old, act(), opts(cols))
+      expect(lines).toHaveLength(1)
+      const t = lineText(lines[0]!)
+      expect(t).toContain('上次：新功能 · TF · 17 小時前')
+      expect(t).not.toMatch(/[●◉○]/)
+      expect(lines[0]!.every(s => s.dim)).toBe(true)
+    }
+    expect(lineText(renderLines(old, act(), { ...opts(160), maxRows: 1 })[0]!)).toContain('上次：新功能 · TF · 17 小時前')
+  })
+  test('同 session 但 stageAt 超過 staleAfterMin → 同樣是「上次」', async () => {
+    const s = applySetStage(emptyState(), { task: 'bugfix', stage: 'fix' }, T0 - 121 * MIN, S)
+    expect(lineText(renderLines(s, act(), opts(160))[0]!)).toContain('上次：修bug · 修正 · 2 小時前')
+    const fresh = applySetStage(emptyState(), { task: 'bugfix', stage: 'fix' }, T0 - 119 * MIN, S)
+    expect(lineText(renderLines(fresh, act(), opts(160))[0]!)).toMatch(/^修bug ●/)
+  })
+  test('舊 store 沒有 stageAt：用 updatedAt 算多久前；沒有步驟時省略步驟段', async () => {
+    const legacy = { task: 'feature' as const, taskSource: 'inferred' as const, stage: null, stageSince: 0, updatedAt: T0 - 3 * 60 * MIN, source: 'none' as const, sessionId: 'old' }
+    expect(lineText(renderLines(legacy, act(), opts(160))[0]!)).toContain('上次：新功能 · 3 小時前')
+  })
+  test('不 fresh 的 accept／已送審不顯示「⏸ 等你」', async () => {
+    const acc = applySetStage(emptyState(), { task: 'feature', stage: 'accept' }, T0 - 17 * 60 * MIN, 'old')
+    for (const l of renderLines(acc, act(), opts(160))) expect(lineText(l)).not.toContain('⏸')
   })
 
   test('活動列在第 3 行；maxRows < 3 時第 2 行併進活動列開頭', async () => {

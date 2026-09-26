@@ -88,6 +88,11 @@ export const THRESHOLDS = {
   stuckIdleMin: 10,
   /** 進行超過幾秒的工具呼叫才顯示在第二行（避免短呼叫造成閃爍）。 */
   showToolAfterSec: 30,
+  /**
+   * 任務／步驟多久沒被設定就不算「現在」（分鐘）：超過、或不是本 session 設定的，
+   * 不畫點線，改畫一行 dim 的「上次：…」。只有 SetStage、權威轉換、推測步驟、任務推斷切換會刷新。
+   */
+  staleAfterMin: 120,
 } as const
 
 /** 重新計算畫面的週期（毫秒）；內容沒變不會 invalidate。 */
