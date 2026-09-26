@@ -293,7 +293,7 @@ export const register: Register = on => {
   // 使用者的 prompt：純本地關鍵字判斷意圖（不呼叫模型）。原樣放行，判斷在 next 之前同步做完、不 await 任何 $。
   on('prompt.submit', ($, e, next) => {
     try {
-      if (enabled && PERSON_ORIGINS.has(e.origin.kind)) onPrompt(e.text, e.turnId !== undefined)
+      if (enabled && PERSON_ORIGINS.has(e.origin?.kind ?? '')) onPrompt(e.text, e.turnId !== undefined)
       invalidateIfChanged($, nowSync())
     } catch {
       // 只影響顯示。

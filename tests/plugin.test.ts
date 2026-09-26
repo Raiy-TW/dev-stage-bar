@@ -449,11 +449,14 @@ describe('prompt 意圖（經由 prompt.submit）', () => {
     expect(rows[0]).toMatch(/^修bug 推測 ◉┄/)
     expect(rows[1]?.trim()).toBe('重現 · 0m')
   })
-  test('只算使用者自己的 prompt：通知、peer、沒有 origin 都不判斷', async ($, on) => {
+  test('只算使用者自己的 prompt：通知、peer、SDK、排程、沒有 origin 都不判斷', async ($, on) => {
     await boot($, on)
-    await say($, '幫我修登入閃退', 'task-notification')
-    await say($, '幫我修登入閃退', 'peer')
-    await $.prompt.submit({ text: '幫我修登入閃退' } as any)
+    for (const kind of ['task-notification', 'peer', 'sdk', 'scheduled-trigger', 'auto-continuation']) {
+      const r: any = await say($, '幫我修登入閃退', kind)
+      expect(r.text).toBe('bottom:幫我修登入閃退')
+    }
+    const r: any = await $.prompt.submit({ text: '幫我修登入閃退' } as any)
+    expect(r.text).toBe('bottom:幫我修登入閃退')
     expect((await band($))[0]).toBe('問答中')
     await say($, '研究一下競品定價', 'bridge')
     expect((await band($))[0]).toMatch(/^非程式 推測 ◉/)

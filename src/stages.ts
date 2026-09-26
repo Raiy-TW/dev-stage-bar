@@ -59,8 +59,9 @@ export const PROJECT_OVERRIDES: Record<
 /**
  * 推斷任務的訊號強度（未宣告 task 時）。較強的訊號可以覆蓋較弱推斷出的任務；
  * 同為 strong 可跨任務切換；宣告（SetStage）的任務不被推斷覆蓋。
- * work 不推斷，靠模型用 SetStage 宣告（數值保留 2／3，與舊 store 存的 taskRank 相容）。
- * - weak：寫程式檔（→ feature）、寫入 /specs/（→ feature）
+ * 工具呼叫不推 work（讀再多檔也不算）；work 來自模型的 SetStage 或使用者 prompt 的意圖（見 PROMPT_INTENT）。
+ * 數值保留 2／3，與舊 store 存的 taskRank 相容。
+ * - weak：寫程式檔（→ feature，只在沒有 fresh 任務時）、寫入 /specs/（→ feature）、使用者 prompt 的意圖（只在沒有 fresh 任務時）
  * - strong：ios-diagnose、systematic-debugging、gh issue（→ bugfix）、brainstorming（→ feature）
  */
 export const TASK_SIGNAL_RANK = { weak: 2, strong: 3 } as const
@@ -119,7 +120,8 @@ export const THRESHOLDS = {
   showToolAfterSec: 30,
   /**
    * 任務／步驟多久沒被設定就不算「現在」（分鐘）：超過、或不是本 session 設定的，
-   * 不畫點線，改畫一行 dim 的「上次：…」。只有 SetStage、權威轉換、推測步驟、任務推斷切換會刷新。
+   * 不畫點線，改畫一行 dim 的「上次：…」。SetStage、權威轉換、推測步驟、任務推斷切換（含 prompt 意圖）會刷新；
+   * 本 session 主迴圈的動作只刷新時間、不改步驟。badge、handoff、讀取類工具不刷新。
    */
   staleAfterMin: 120,
 } as const
