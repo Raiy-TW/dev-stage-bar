@@ -170,6 +170,15 @@ describe('任務訊號', () => {
     expect(classify({ tool: 'Bash', command: 'npm test', agentId: 'a1' }).other).toBeFalsy()
     expect(classify({ tool: 'Write', file_path: '/p/a.md', agentId: 'a1' }).other).toBeFalsy()
   })
+  test('MCP 工具：預設算動作；名稱看起來唯讀（get/list/read/search/…、screenshot、ui_describe/ui_view）不算；SetStage 不算', async () => {
+    for (const tool of ['mcp__ios-simulator__ui_tap', 'mcp__ios-simulator__launch_app', 'mcp__svc__create_event', 'mcp__svc__send_message']) {
+      expect(classify({ tool }).other).toBe(true)
+    }
+    for (const tool of ['mcp__ios-simulator__screenshot', 'mcp__ios-simulator__ui_describe_all', 'mcp__ios-simulator__ui_view', 'mcp__svc__get_event', 'mcp__svc__list_apps', 'mcp__svc__search_threads', 'mcp__svc__read_file_content', 'mcp__svc__query', 'mcp__svc__find', 'mcp__svc__describe_x', 'mcp__svc__view_x', 'mcp__svc__fetch_x', 'mcp__dev-stage-bar__SetStage']) {
+      expect(classify({ tool }).other).toBeFalsy()
+    }
+    expect(classify({ tool: 'mcp__ios-simulator__ui_tap', agentId: 'a1' }).other).toBeFalsy()
+  })
   test('中性工具（AskUserQuestion、TodoWrite、Skill 無訊號）不算動作', async () => {
     for (const e of [{ tool: 'AskUserQuestion' }, { tool: 'TodoWrite' }, { tool: 'Skill', skill: 'humanizer-zh-tw' }]) expect(classify(e).other).toBeFalsy()
   })

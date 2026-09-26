@@ -53,6 +53,10 @@ const TASK_SKILLS: Readonly<Record<string, TaskId>> = {
 const READ_TOOLS: ReadonlySet<string> = new Set(['Read', 'Grep', 'Glob', 'WebFetch', 'WebSearch', 'ToolSearch', 'LS', 'NotebookRead'])
 /** 不算讀取也不算其他動作的工具（互動、規劃、本身無訊號的 skill）。 */
 const NEUTRAL_TOOLS: ReadonlySet<string> = new Set(['AskUserQuestion', 'TodoWrite', 'Skill', 'Workflow', 'SendMessage', 'TaskStop', 'Monitor'])
+/** MCP 工具名最後一段看起來唯讀就不算動作（其餘 MCP 工具預設算動作）。 */
+const MCP_READ_ONLY = /^(get|list|read|search|query|find|describe|view|fetch|screenshot|ui_describe|ui_view)/i
+/** 本 plugin 自己的工具（hooks 會先攔下，不會進 classify；這裡再保險一次）。 */
+const OWN_TOOL = 'SetStage'
 const READ_ONLY_BASH = /^\s*(ls|cat|head|tail|grep|rg|find|fd|wc|pwd|echo|which|file|stat|tree|du|jq|less|sed -n|git (status|log|diff|show|branch|blame|remote))\b/
 
 const RE = {
@@ -163,7 +167,11 @@ export function classify(e: ToolEvent): Classification {
       if (main) c.other = true
       break
     default:
-      if (main && !READ_TOOLS.has(e.tool) && !NEUTRAL_TOOLS.has(e.tool) && !e.tool.startsWith('mcp__')) c.other = true
+      if (!main) break
+      if (e.tool.startsWith('mcp__')) {
+        const name = e.tool.split('__').pop() ?? ''
+        if (name !== OWN_TOOL && !MCP_READ_ONLY.test(name)) c.other = true
+      } else if (!READ_TOOLS.has(e.tool) && !NEUTRAL_TOOLS.has(e.tool)) c.other = true
   }
   return c
 }
