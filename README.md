@@ -11,9 +11,9 @@ A Claude Code mod (function hooks plugin) that draws the current task's step pro
 ```
 
 - 第 1 行：最左是任務名，接著每個步驟一個點，點距隨終端寬度伸縮；右側是 milestone。沒有「現在」的任務時不畫點線，只畫一行 dim：
-  - `問答中`：本 turn 還沒有任何動作（只有讀取類工具或沒用工具）。
-  - `判斷任務中…`：本 turn 已經改檔、跑非唯讀指令或派 subagent，但任務還沒判定。
-  - 有舊任務時後面接 `· 上次：新功能 · TF · 17 小時前`（沒有步驟時省略步驟段）。
+  - `問答中`：還沒有任何動作，或上一個 turn 只有讀取類工具／沒用工具。
+  - `判斷任務中…`：進行中的 turn 已經改檔、跑非唯讀指令、派 subagent 或呼叫會改東西的 MCP 工具，但任務還沒判定。turn 結束後就不再顯示，只剩「上次：…」（沒有舊任務時「問答中」）。
+  - 有舊任務時接 `上次：新功能 · TF · 17 小時前`（沒有步驟時省略步驟段）。
 - 第 2 行：只在目前那個點正下方寫「步驟 · 進度 · 本步驟耗時」。
 - 第 3 行：進行中的 subagent／最久的指令，以及狀態：🔄 執行中、⏸ 等你（提問、授權、驗收、排審）、⚠ 可能卡住。有現在的任務、上一個 turn 是問答、且沒有工具在跑時寫 dim 的「討論中」（badge 照舊接在後面）。
 - 窄於 40 欄時退回單行：`修bug ●●◉○○○○ 紅測試 · 12m`。
@@ -88,16 +88,16 @@ mod 在每個專案都註冊工具 `mcp__dev-stage-bar__SetStage({ task?, stage,
 
 ## 新鮮度：「現在」還是「上次」
 
-狀態以 cwd 為 key 存在 plugin store，跨 session 保留。只有**真的設定任務／步驟**的事件會把它標成「現在」：SetStage、權威轉換、推測步驟（推測到目前這一步也算）、任務推斷切換。badge、`/load`／`/save`、其他工具呼叫都不算。
+狀態以 cwd 為 key 存在 plugin store，跨 session 保留。會把它標成「現在」的事件：SetStage、權威轉換、推測步驟（推測到目前這一步也算）、任務推斷切換，以及本 session 主迴圈的任何動作（改檔、非唯讀指令、派 subagent…，只刷新時間、不改步驟）。badge、`/load`／`/save`、讀取類工具都不算。
 
 - **fresh**＝最後一次設定是本 session，且距今不到 `THRESHOLDS.staleAfterMin`（預設 120 分鐘）。只有 fresh 的任務才畫點線。
 - 不 fresh 的任務只畫一行 dim 的「上次：…」，不會因為新 session 跑了別的指令就看起來像現在的階段。
-- 不 fresh 的任務在推斷裡強度為 0：本 session 任何任務訊號都能取代它（同一種任務也重新開始）。本 session 的步驟訊號若屬於舊任務的步驟表，就延續舊任務並變回 fresh（步驟計時重來，舊的 detail 不帶過來）。
+- 別的 session 的任務、或本 session 推斷但已過期的任務，在推斷裡強度為 0：本 session 任何任務訊號都能取代它（同一種任務也重新開始）。本 session 宣告的任務即使過期也不被推斷取代。本 session 的步驟訊號若屬於舊任務的步驟表，就延續舊任務並變回 fresh（步驟計時重來，舊的 detail 不帶過來；延續的是別的 session 宣告的任務時標「推測」）。
 - 0.2 以前存的狀態沒有新鮮度欄位，一律視為「上次」；0.1 版存的 `tf`／`device` 會讀成 feature 的 `ship`／`accept`。
 
 ## 問答偵測
 
-主迴圈一個 turn 裡只有讀取類工具（Read／Grep／Glob／WebFetch／WebSearch／ToolSearch、唯讀 Bash）、中性工具（AskUserQuestion、TodoWrite、沒有訊號的 Skill…）或完全沒用工具，就是「對話 turn」：不改任務／步驟、不刷新新鮮度，只改顯示（第 1 行「問答中」或第 3 行「討論中」）。改檔（含 `.md`）、非唯讀指令、派 subagent、SetStage，或任何改了任務／步驟的呼叫，都讓這個 turn 算「有動作」。
+主迴圈一個 turn 裡只有讀取類工具（Read／Grep／Glob／WebFetch／WebSearch／ToolSearch、唯讀 Bash）、中性工具（AskUserQuestion、TodoWrite、沒有訊號的 Skill…）、名稱看起來唯讀的 MCP 工具，或完全沒用工具，就是「對話 turn」：不改任務／步驟、不刷新新鮮度，只改顯示（第 1 行「問答中」或第 3 行「討論中」）。改檔（含 `.md`）、非唯讀指令、派 subagent、其他 MCP 工具、SetStage，或任何改了任務／步驟的呼叫，都讓這個 turn 算「有動作」。
 
 ## 自訂
 
@@ -123,10 +123,10 @@ CLAUDE_CODE_ENABLE_FUNCTION_HOOKS=1 claude plugin validate .  # 檢查 hook 與 
 
 - 按下授權後、指令真正開始前的幾秒仍顯示「⏸ 等你」；非 Bash 工具授權後會一路顯示到結束。
 - 右側的 `[-]` 是 Claude Code 自己加的收合鈕。
-- `mcp__*` 工具一律算中性：只用 MCP 工具（例如操作模擬器）的 turn 會被當成對話 turn。
-- 問答偵測以 turn 為單位：turn 還沒結束前不知道它是不是對話；上一個 turn 有動作而任務沒判定時，會一直顯示「判斷任務中…」到下一個 turn 開始。
+- `mcp__*` 工具預設算動作，名稱最後一段以 get／list／read／search／query／find／describe／view／fetch／screenshot／ui_describe／ui_view 開頭的算讀取（`src/rules.ts` 的 `MCP_READ_ONLY`）。名稱猜錯時會誤判問答。
+- 問答偵測以 turn 為單位：turn 還沒結束前不知道它是不是對話。背景 subagent 完成後引擎自己開的接續 turn（沒有使用者文字）不改變上一個 turn 的判定。
 - 提醒段附加在 system prompt 的 `env_info_simple` 段；若之後版本改名或省略該段，提醒就不會出現（SetStage 的工具說明仍在）。
-- 同一件事做超過 120 分鐘都沒有 SetStage、權威轉換或推測步驟，會變成「上次」；再有任何步驟訊號就回來。
+- 只討論、不動手超過 120 分鐘，任務會變成「上次」；再有任何步驟訊號、SetStage 或本 session 的動作就回來。
 - Function hooks 仍是 early access，Claude Code 更新可能需要跟著調整。
 
 ## License
