@@ -30,10 +30,12 @@ let setStageTool = ''
 let state: StageState = emptyState()
 let th: Thresholds = THRESHOLDS
 let isWorking = false
-/** 目前主迴圈 turn 已有非讀取動作（turn.start 重設）。 */
+/** 進行中的主迴圈 turn 已有非讀取動作（turn.complete 清掉）。 */
 let turnActed = false
-/** 最近一個完成的主迴圈 turn 是對話（只有讀取類／中性工具或沒有工具）。 */
-let lastTurnChat = false
+/** 最近一個完成的主迴圈 turn 是對話還是有動作。 */
+let lastTurn: 'chat' | 'acted' | undefined
+/** 進行中的 turn 是接續 turn（背景 subagent 完成後引擎自己開的，text 為空）。 */
+let continuation = false
 let lastEventAt: number | null = null
 let lastSignature = ''
 const lastEventByOwner: Record<string, number> = {}
@@ -73,7 +75,7 @@ function parseMinutes(raw: string | undefined, fallback: number): number {
 }
 
 function activity(now: number): Activity {
-  return { now, isWorking, lastEventAt, lastEventByOwner: { ...lastEventByOwner }, calls: [...calls.values()], agents, turnActed, lastTurnChat }
+  return { now, isWorking, lastEventAt, lastEventByOwner: { ...lastEventByOwner }, calls: [...calls.values()], agents, turnActed, ...(lastTurn ? { lastTurn } : {}) }
 }
 
 function signature(now: number): string {
@@ -257,7 +259,9 @@ export const register: Register = on => {
     // 新的主迴圈 turn 開始時，上一輪主迴圈不可能還有進行中的呼叫：清掉殘留（中斷時可能漏收結束）。
     for (const [k, c] of calls) if (!c.agentId) calls.delete(k)
     // turn.start 只在主迴圈觸發（subagent 的 run 沒有 turn.start）。
-    turnActed = false
+    // 沒有使用者文字的接續 turn 延續上一個 turn 的判定，不重設。
+    continuation = e.text === ''
+    if (!continuation) turnActed = false
     try {
       // /clear 不會重跑 session.start，但 session id 會換：換了就讓 session 範圍的鎖／badge／接手標記失效。
       const id = await $.session.id()
@@ -285,7 +289,11 @@ export const register: Register = on => {
     const r = await next(e)
     try {
       if (enabled && !e.agentId) {
-        lastTurnChat = !turnActed
+        // 接續 turn 沒有動作時，保留上一個 turn 的判定（例如派背景 subagent 的 turn 不會被改判成對話）。
+        if (turnActed) lastTurn = 'acted'
+        else if (!continuation) lastTurn = 'chat'
+        turnActed = false
+        continuation = false
         invalidateIfChanged($, nowSync())
       }
     } catch {

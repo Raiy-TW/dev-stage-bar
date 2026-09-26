@@ -28,10 +28,10 @@ export type Activity = {
   calls: readonly InFlight[]
   /** 進行中的 subagent。 */
   agents: readonly AgentRow[]
-  /** 目前（或剛結束）的主迴圈 turn 已有非讀取動作（改檔、非唯讀指令、派 subagent、SetStage、改了任務／步驟）。 */
+  /** 進行中的主迴圈 turn 已有非讀取動作（改檔、非唯讀指令、派 subagent、SetStage、改了任務／步驟）；turn 結束即清掉。 */
   turnActed?: boolean
-  /** 最近一個完成的主迴圈 turn 只有讀取類／中性工具或完全沒工具：對話 turn。 */
-  lastTurnChat?: boolean
+  /** 最近一個完成的主迴圈 turn：chat＝只有讀取類／中性工具或完全沒工具；acted＝有動作。還沒有完成的 turn 時為 undefined。 */
+  lastTurn?: 'chat' | 'acted'
 }
 
 export type Seg = { text: string; color?: string; bold?: boolean; dim?: boolean; inverse?: boolean }
@@ -204,17 +204,19 @@ function alignUnder(label: Line, x: number, columns: number): Line {
 }
 
 /**
- * 沒有 fresh 任務：一行 dim。本 turn 已有動作 →「判斷任務中…」，否則「問答中」；
- * 有舊任務時接「 · 上次：新功能 · TF · 17 小時前」。
+ * 沒有 fresh 任務：一行 dim。進行中的 turn 已有動作 →「判斷任務中…」；
+ * 有動作的 turn 已結束（任務仍未判定）→ 沒有開頭，只剩「上次：…」（沒有舊任務時「問答中」）；
+ * 其餘 →「問答中」。有舊任務時接「上次：新功能 · TF · 17 小時前」。
  */
 function notNowLine(state: StageState, project: ProjectKind, act: Activity, columns: number): Line {
-  const head = act.turnActed ? PENDING_TEXT : CHAT_TEXT
-  const text = state.task ? `${head} · ${lastText(state, project, act.now)}` : head
+  const last = state.task ? lastText(state, project, act.now) : undefined
+  const head = act.turnActed ? PENDING_TEXT : act.lastTurn === 'acted' && last ? undefined : CHAT_TEXT
+  const text = [head, last].filter((p): p is string => !!p).join(' · ')
   return fitLine([{ text, dim: true }], columns)
 }
 
 /** 對話中：最近完成的 turn 是對話、本 turn 還沒有動作、也沒有工具或 subagent 在跑。 */
-const chatting = (act: Activity): boolean => !!act.lastTurnChat && !act.turnActed && act.calls.length === 0 && act.agents.length === 0
+const chatting = (act: Activity): boolean => act.lastTurn === 'chat' && !act.turnActed && act.calls.length === 0 && act.agents.length === 0
 
 /** 窄版單行：修bug ●◉○○○○○ 診斷 · 12m */
 function compactLine(state: StageState, project: ProjectKind, act: Activity, fresh: boolean, columns: number): Line {
