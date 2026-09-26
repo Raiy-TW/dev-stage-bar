@@ -9,6 +9,8 @@ import { applyClassification, applySetStage, emptyState, migrateState, resolveSe
 import { renderLines, lineText, type Activity, type AgentRow, type InFlight, type Line, type Thresholds } from '../src/format.ts'
 
 const SET_STAGE = 'SetStage'
+/** 提醒段附加在這個 system prompt 段尾（實測每個 session 都有、內容穩定，不打壞 prompt cache）。 */
+const REMINDER_SECTION = 'env_info_simple'
 const MAIN = 'main'
 /** 給排版留 1 欄餘裕，避免 ambiguous-width 字元在某些字型下多佔一欄造成折行。 */
 const SAFETY_COLUMNS = 1
@@ -185,11 +187,19 @@ function onSetStage(e: Record<string, unknown>): string {
   return `已設為 ${TASKS[resolved.task].label} · ${label}（${resolved.stage}）${input.detail ? ` · ${input.detail}` : ''}${input.milestone ? ` · ${input.milestone}` : ''}`
 }
 
-/** 給模型看的使用規則：這是所有專案的模型知道要宣告進度的唯一管道，寫精簡。 */
+/** system prompt 的提醒段：只在 SetStage 註冊成功後加，用實際註冊到的完整工具名。 */
+function stageReminder(tool: string): string {
+  return [
+    `進度條：開始實際工作（寫程式、修 bug、做研究／規劃／文件產出）時呼叫 ${tool} 並帶 task；`,
+    '之後每進入下一步再呼叫一次，任務換了就帶新的 task。純問答、釐清問題時不要呼叫。',
+  ].join('')
+}
+
+/** 給模型看的使用規則：和提醒段一致，寫精簡。 */
 function setStageDescription(kind: ProjectKind): string {
   return [
     '宣告目前任務與步驟，顯示在使用者 prompt 上方的進度條（只影響顯示）。',
-    '接到新任務時先呼叫一次並帶 task（feature 新功能／bugfix 修 bug／work 研究、規劃、文件等非程式工作）；之後每進入一個步驟再呼叫一次；任務換了就帶新的 task。',
+    '開始實際工作時先呼叫一次並帶 task（feature 新功能／bugfix 修 bug／work 研究、規劃、文件等非程式工作）；之後每進入一個步驟再呼叫一次；任務換了就帶新的 task。純問答、釐清問題時不用呼叫。',
     ...TASK_IDS.map(t => `${t}: ${stageIds(t, kind).join(', ')}`),
     'detail 是簡短進度（例如 "T3/5"），milestone 是里程碑代號（例如 "M48"）。',
   ].join('\n')
@@ -226,6 +236,8 @@ export const register: Register = on => {
       })
       setStageTool = reg?.tool ?? ''
       enabled = true
+      // 提醒段在 SetStage 註冊之後才能帶正確的工具名：丟掉可能已快取的段（只在 session 開始做一次）。
+      if (setStageTool) $.ui.invalidate('prompt.section')
       $.clock.every(TICK_MS, () => {
         refresh($).catch(ignore)
       })
@@ -255,6 +267,17 @@ export const register: Register = on => {
     }
     invalidateIfChanged($, nowSync())
     return r
+  })
+
+  on('prompt.section', { name: REMINDER_SECTION }, async ($, e, next) => {
+    const r = await next(e)
+    try {
+      // 核心省略該段（null）時不硬塞；SetStage 沒註冊成功也不加。
+      if (!enabled || !setStageTool || r.text === null) return r
+      return { text: `${r.text}\n\n${stageReminder(setStageTool)}` }
+    } catch {
+      return r
+    }
   })
 
   // 主迴圈 turn 結束：本 turn 沒有任何動作 → 對話 turn（只影響顯示，不改任務／步驟）。

@@ -6,13 +6,14 @@ const CWD = '/p/my-app'
 const MIN = 60_000
 const T0 = 1_700_000_000_000
 
-type Opts = { ios?: boolean; env?: Record<string, string>; store?: Record<string, unknown>; agents?: unknown[]; toolPrefix?: string; ids?: string[]; hangAgentList?: boolean }
+type Opts = { ios?: boolean; env?: Record<string, string>; store?: Record<string, unknown>; agents?: unknown[]; toolPrefix?: string; ids?: string[]; hangAgentList?: boolean; registerFails?: boolean }
 
 async function boot($: any, on: any, o: Opts = {}) {
   const clock = mock.clock(on, { now: T0 })
   mock.store(on, o.store ?? {})
   mock.env(on, o.env ?? {})
   const registered: string[] = []
+  const descriptions: Record<string, string> = {}
   on('session.start', ($: any, e: any) => ({ cwd: e.cwd }))
   on('session.cwd', () => ({ value: CWD }))
   // 可切換的 session id：/clear 之後 id 會變，但 session.start 不會再跑。
@@ -26,7 +27,9 @@ async function boot($: any, on: any, o: Opts = {}) {
         : [{ name: 'MyApp.xcodeproj', kind: 'dir', size: 0, isLink: false }],
   }))
   on('tool.register', ($: any, e: any) => {
+    if (o.registerFails) throw new Error('register refused')
     registered.push(e.name)
+    descriptions[e.name] = e.description
     return { value: { tool: `${o.toolPrefix ?? 'mcp__dev-stage-bar__'}${e.name}` } }
   })
   on('agent.list', async () => {
@@ -35,6 +38,7 @@ async function boot($: any, on: any, o: Opts = {}) {
   })
   on('turn.start', ($: any, e: any) => ({ turnId: e.turnId }))
   on('turn.complete', ($: any, e: any) => ({ text: e.answer }))
+  on('prompt.section', ($: any, e: any) => ({ text: e.text }))
   on('tool.check', () => ({ decision: 'ask' }))
   on('ui.render', () => ({ type: 'engine', ref: 0 }))
   // 最底層的工具實作：Bash 的 sleep 會在 mock clock 上等 30 分鐘。
@@ -43,7 +47,7 @@ async function boot($: any, on: any, o: Opts = {}) {
     return { result: `bottom:${e.tool}` }
   })
   await $.session.start({ cwd: CWD, surface: 'terminal', isInteractive: true })
-  return { clock, registered, clearSession: () => void idIndex++ }
+  return { clock, registered, descriptions, clearSession: () => void idIndex++ }
 }
 
 const PROPS = (over: Record<string, unknown> = {}) => ({
@@ -257,6 +261,32 @@ describe('新鮮度（截圖：舊推測被新 session 的 badge 洗白）', () 
 const turnStart = ($: any, turnId: string) => $.turn.start({ text: 'q', turnId } as any)
 const turnComplete = ($: any, turnId: string, agentId?: string) =>
   $.turn.complete({ answer: 'a', durationMs: 1000, isAborted: false, turnId, reason: 'answer', ...(agentId ? { agentId } : {}) } as any)
+
+describe('system prompt 提醒（f）', () => {
+  const SECTION = 'env_info_simple'
+  test('在 env_info_simple 段尾加提醒，用實際註冊到的工具名；其他段不動', async ($, on) => {
+    await boot($, on, { toolPrefix: 'mcp__renamed__' })
+    const r = await $.prompt.section({ name: SECTION, text: 'ENV' })
+    expect(r.text!.startsWith('ENV\n\n')).toBe(true)
+    expect(r.text).toContain('mcp__renamed__SetStage')
+    expect(r.text).toContain('task')
+    expect(r.text).toContain('純問答')
+    expect((await $.prompt.section({ name: 'memory', text: 'M' })).text).toBe('M')
+  })
+  test('核心省略該段（null）時不硬塞', async ($, on) => {
+    await boot($, on)
+    expect((await $.prompt.section({ name: SECTION, text: null })).text).toBeNull()
+  })
+  test('SetStage 沒註冊成功就不加', async ($, on) => {
+    await boot($, on, { registerFails: true })
+    expect((await $.prompt.section({ name: SECTION, text: 'ENV' })).text).toBe('ENV')
+  })
+  test('SetStage 工具說明寫明純問答不用呼叫', async ($, on) => {
+    const { descriptions } = await boot($, on)
+    expect(descriptions.SetStage).toContain('純問答')
+    expect(descriptions.SetStage).toContain('task')
+  })
+})
 
 describe('問答偵測（d）', () => {
   test('沒有 fresh 任務：零工具 turn 後畫「問答中」；舊任務接「上次」', async ($, on) => {
