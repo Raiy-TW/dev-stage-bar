@@ -65,6 +65,35 @@ export const PROJECT_OVERRIDES: Record<
  */
 export const TASK_SIGNAL_RANK = { weak: 2, strong: 3 } as const
 
+/**
+ * prompt 意圖（純本地關鍵字，不呼叫模型、不花 token）：只看使用者自己送出的 prompt。
+ * - rules 依陣列順序比對，第一個命中的就是答案（同時命中 bug 與 feature → bugfix；feature 與 work → feature）。
+ * - 有任一 rules 命中就不算 chat（「為什麼會閃退？」是 bugfix）。
+ * - 中文關鍵字以子字串比對；英文以單字邊界、不分大小寫比對（address 不是 add、debugger 不是 bug）。
+ * - neutralize：比對前先換掉的詞（「修改」是改，不是修 bug）。
+ * - continuation：整段（去掉標點與空白）等於其中一個、或不超過 shortMax 個字 → 不判斷；以 / 開頭的 slash command 也不判斷。
+ */
+export const PROMPT_INTENT = {
+  rules: [
+    { task: 'bugfix', stage: 'reproduce', keywords: ['修', 'bug', '壞', '錯誤', '閃退', 'crash', '卡住', '報錯', 'error', 'fix', '失敗', '不會動', 'debug'] },
+    { task: 'feature', stage: 'intent', keywords: ['新增', '加上', '加一個', '做一個', '實作', '優化', '改成', 'implement', 'add', 'build'] },
+    { task: 'work', stage: 'clarify', keywords: ['研究', '調查', '規劃', '整理', '文件', '報告', '比較', 'research', 'plan', 'docs'] },
+  ],
+  chat: {
+    endings: ['?', '？'],
+    keywords: ['嗎', '呢', '為什麼', '什麼', '怎麼', '如何', '是不是', '會不會', '有沒有', '能不能', '差別', '解釋', 'why', 'what', 'how'],
+  },
+  neutralize: { 修改: '改', 修飾: '飾' },
+  continuation: ['繼續', '好', '好的', 'ok', 'okay', 'yes', 'go', 'push', 'commit', '存檔', 'save', '可以', '對'],
+  shortMax: 2,
+} as const satisfies {
+  rules: readonly { task: TaskId; stage: StageId; keywords: readonly string[] }[]
+  chat: { endings: readonly string[]; keywords: readonly string[] }
+  neutralize: Readonly<Record<string, string>>
+  continuation: readonly string[]
+  shortMax: number
+}
+
 /** 舊版（0.1）stage id 的對應：tf → ship、device → accept。 */
 export const LEGACY_STAGE_IDS: Readonly<Record<string, StageId>> = { tf: 'ship', device: 'accept' }
 
