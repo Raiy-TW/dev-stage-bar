@@ -281,6 +281,29 @@ describe('system prompt 提醒（f）', () => {
     await boot($, on, { registerFails: true })
     expect((await $.prompt.section({ name: SECTION, text: 'ENV' })).text).toBe('ENV')
   })
+  const spyInvalidate = (on: any): string[] => {
+    const events: string[] = []
+    on('ui.invalidate', ($: any, e: any) => {
+      events.push(e.event)
+    })
+    return events
+  }
+  test('session.start 後只 invalidate 一次 prompt.section；之後的工具呼叫、turn、tick 都不再 invalidate 它', async ($, on) => {
+    const events = spyInvalidate(on)
+    const { clock } = await boot($, on)
+    expect(events.filter(e => e === 'prompt.section')).toHaveLength(1)
+    await turnStart($, 't1')
+    await $.tool.call({ tool: TOOL, task: 'feature', stage: 'impl' } as any)
+    await $.tool.call({ tool: 'Bash', command: 'npm test' } as any)
+    await turnComplete($, 't1')
+    await clock.advance(5 * MIN)
+    expect(events.filter(e => e === 'prompt.section')).toHaveLength(1)
+  })
+  test('SetStage 註冊失敗時不 invalidate prompt.section', async ($, on) => {
+    const events = spyInvalidate(on)
+    await boot($, on, { registerFails: true })
+    expect(events).not.toContain('prompt.section')
+  })
   test('SetStage 工具說明寫明純問答不用呼叫', async ($, on) => {
     const { descriptions } = await boot($, on)
     expect(descriptions.SetStage).toContain('純問答')
